@@ -1,0 +1,41 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Job Application for Backend Engineer at Initech</title></head>
+<body>
+<div id="app">
+<form id="application-form">
+  <h2>Apply for this job</h2>
+  <div class="field"><label for="first_name">First Name*</label><input id="first_name" required></div>
+  <div class="field"><label for="last_name">Last Name*</label><input id="last_name" required></div>
+  <div class="field"><label for="email">Email*</label><input id="email" type="email" required></div>
+  <div class="field"><label for="phone">Phone</label><input id="phone" type="tel"></div>
+  <div class="field"><label for="resume">Resume/CV*</label><input id="resume" name="resume" type="file" required style="display:none">
+    <button type="button">Attach</button></div>
+  <div class="field"><label for="question_1">LinkedIn Profile</label><input id="question_1"></div>
+  <div class="field"><label for="question_2">Will you now or in the future require visa sponsorship?*</label>
+    <select id="question_2" required><option value="">Select...</option><option>Yes</option><option>No</option></select></div>
+  <div class="field"><label for="gender">Gender</label>
+    <select id="gender"><option value="">Select...</option><option>Male</option><option>Female</option><option>Decline To Self Identify</option></select></div>
+  <button type="submit">Submit application</button>
+</form>
+</div>
+<script>
+  window.__finalSubmit = 0;
+  document.getElementById('application-form').addEventListener('submit', e => {
+    e.preventDefault();
+    if (!document.getElementById('resume').files.length) { alert('resume missing'); return; }
+    document.getElementById('app').innerHTML = `
+      <form id="security-form">
+        <p>We've sent a security code to your email. Enter it below to finish your application.</p>
+        ${[0,1,2,3,4,5,6,7].map(i => `<input id="security-input-${i}" maxlength="1" aria-label="Security code character ${i+1}">`).join('')}
+        <button type="submit">Submit application</button>
+      </form>`;
+    document.getElementById('security-form').addEventListener('submit', ev => {
+      ev.preventDefault(); window.__finalSubmit++;
+      const code = [0,1,2,3,4,5,6,7].map(i => document.getElementById('security-input-' + i).value).join('');
+      document.getElementById('app').innerHTML = code === 'nE5Cx0Ky'
+        ? '<h1>Thank you for applying.</h1><p>Your application has been submitted.</p>'
+        : '<p class="error">Incorrect security code</p>';
+    });
+  });
+</script>
+</body></html>

@@ -1,0 +1,83 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Careers – Apply</title>
+<style>
+  .sr-only { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }
+  .hidden-input { opacity:0; position:absolute; width:1px; height:1px; }
+  .listbox { border:1px solid #ccc; }
+  .field { margin: 8px 0; }
+  .error { color: red; }
+  #conditional { display:none; }
+</style></head>
+<body>
+<form id="app-form">
+  <div class="field"><label for="fn">First Name *</label><input id="fn" name="first_name" required></div>
+  <div class="field"><label for="ln">Last Name *</label><input id="ln" name="last_name" required></div>
+  <div class="field"><label for="em">Email *</label><input id="em" type="email" name="email" required value="prefilled@example.com"></div>
+  <div class="field"><label for="yrs">How many years of experience do you have with Python?</label>
+    <input id="yrs" type="text" class="numeric-input" aria-required="true"></div>
+  <div class="field"><label for="why">Why do you want to work here?</label><textarea id="why" maxlength="500"></textarea></div>
+  <div class="field"><label for="auth">Are you legally authorized to work in the United States? *</label>
+    <select id="auth"><option>Select...</option><option>Yes</option><option>No</option></select></div>
+
+  <fieldset class="field" aria-required="true">
+    <legend><span aria-hidden="true">Will you now or in the future require sponsorship?</span><span class="sr-only">Will you now or in the future require sponsorship?</span></legend>
+    <input class="hidden-input" type="radio" name="spons" id="sp-y" value="Yes"><label for="sp-y">Yes</label>
+    <input class="hidden-input" type="radio" name="spons" id="sp-n" value="No"><label for="sp-n">No</label>
+  </fieldset>
+
+  <fieldset class="field"><legend>Which languages do you use?</legend>
+    <label><input type="checkbox" name="lang1"> Python</label>
+    <label><input type="checkbox" name="lang2"> Go</label>
+    <label><input type="checkbox" name="lang3"> Rust</label>
+  </fieldset>
+
+  <div class="field"><label for="cmb" id="cmb-label">Gender</label>
+    <input id="cmb" role="combobox" aria-labelledby="cmb-label" aria-controls="cmb-list" autocomplete="off">
+    <div id="cmb-list" role="listbox" class="listbox" style="display:none"></div>
+  </div>
+
+  <div class="field">
+    <div class="question">Do you have a valid driver's license?</div>
+    <div class="yesno"><button type="button">Yes</button><button type="button">No</button></div>
+  </div>
+
+  <div class="field"><label for="resume">Resume/CV *</label>
+    <input id="resume" type="file" name="resume" style="display:none">
+    <button type="button" onclick="document.getElementById('resume').click()">Attach</button></div>
+
+  <div class="field"><input type="checkbox" id="agree"><label for="agree">I certify that the information provided is accurate *</label></div>
+  <div class="field" id="conditional"><label for="hid">Hidden question</label><input id="hid"></div>
+  <input type="hidden" name="token" value="x">
+  <button type="submit" id="submit">Submit Application</button>
+</form>
+<script>
+  const opts = ["Male", "Female", "Non-binary", "I don't wish to answer"];
+  const cmb = document.getElementById('cmb'); const list = document.getElementById('cmb-list');
+  function render(filter) {
+    list.innerHTML = '';
+    opts.filter(o => !filter || o.toLowerCase().includes(filter.toLowerCase())).forEach(o => {
+      const d = document.createElement('div'); d.setAttribute('role', 'option'); d.textContent = o;
+      d.addEventListener('click', () => { cmb.value = o; list.style.display = 'none'; });
+      list.appendChild(d);
+    });
+    list.style.display = 'block';
+  }
+  cmb.addEventListener('click', () => render(''));
+  cmb.addEventListener('input', () => render(cmb.value));
+  cmb.addEventListener('keydown', e => { if (e.key === 'Escape') list.style.display = 'none'; });
+  document.querySelectorAll('.yesno button').forEach(b => b.addEventListener('click', () => {
+    document.querySelectorAll('.yesno button').forEach(x => x.setAttribute('aria-pressed', 'false'));
+    b.setAttribute('aria-pressed', 'true');
+  }));
+  document.getElementById('app-form').addEventListener('submit', e => {
+    e.preventDefault();
+    document.querySelectorAll('.error').forEach(x => x.remove());
+    const yrs = document.getElementById('yrs');
+    if (!/^\d+$/.test(yrs.value)) {
+      const err = document.createElement('div'); err.className = 'error'; err.textContent = 'Enter a whole number';
+      yrs.parentElement.appendChild(err); yrs.setAttribute('aria-invalid', 'true'); return;
+    }
+    document.body.innerHTML = '<h1>Thank you for applying!</h1>';
+  });
+</script>
+</body></html>

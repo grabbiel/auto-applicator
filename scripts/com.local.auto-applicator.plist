@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent template for Auto Applicator. Don't load this file directly:
+  use the app menu item "Install daily schedule" (or the CLI flag install-schedule), which fills in
+  the placeholders and installs it to ~/Library/LaunchAgents/com.local.auto-applicator.plist.
+  The scheduled run uses the "run" mode, so it honours dry_run in your config.yaml.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.local.auto-applicator</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__UV__</string>
+        <string>run</string>
+        <string>--project</string>
+        <string>__PROJECT__</string>
+        <string>--quiet</string>
+        <string>auto-applicator</string>
+        <string>--run</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__PROJECT__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__PATH__</string>
+        <key>AA_HOME</key>
+        <string>__AA_HOME__</string>
+    </dict>
+
+    <key>StartCalendarInterval</key>
+    __CALENDAR__
+
+    <key>StandardOutPath</key>
+    <string>__LOGS__/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOGS__/launchd.err.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+</dict>
+</plist>

@@ -1,0 +1,107 @@
+# Auto Applicator – candidate profile (example).
+#
+# The setup wizard creates your real profile at
+# ~/Library/Application Support/AutoApplicator/profile.yaml (it can pre-fill it from your resume).
+# Every answer the app gives on an application form is grounded in this file. If a required
+# question can't be answered from it, the job is skipped and the question is saved so you can
+# answer it once ("Answer pending questions") – the answer is then reused forever.
+
+personal:
+  first_name: "Jane"
+  last_name: "Doe"
+  preferred_name: ""
+  email: "jane.doe@example.com"
+  phone: "555-123-4567"
+  phone_country_code: "+1"
+  address:
+    street: ""
+    city: "Austin"
+    state: "TX"
+    postal_code: "78701"
+    country: "United States"
+  location: "Austin, TX"
+  linkedin: "https://www.linkedin.com/in/janedoe"
+  github: "https://github.com/janedoe"
+  portfolio: ""
+
+work_authorization:
+  authorized_to_work_us: true
+  requires_sponsorship: false
+  visa_status: "US Citizen"
+  citizenship: "United States"
+  security_clearance: "None"
+
+compensation:
+  desired_base: 150000
+  range_min: 140000
+  range_max: 175000
+  currency: "USD"
+
+preferences:
+  willing_to_relocate: false
+  open_to_remote: true
+  open_to_hybrid: true
+  open_to_onsite: false
+  notice_period: "2 weeks"
+  earliest_start_date: "2 weeks after offer"
+  over_18: true
+  how_did_you_hear: "LinkedIn"
+
+summary: >-
+  Backend engineer with 6 years building data-intensive Python services and APIs.
+
+skills: ["Python", "SQL", "PostgreSQL", "AWS", "Docker", "Kubernetes", "FastAPI"]
+
+# Years of hands-on experience per skill. Used for "How many years of X?" questions.
+experience_years:
+  total: 6
+  Python: 6
+  SQL: 5
+  AWS: 4
+  Docker: 4
+  Kubernetes: 2
+
+work_history:
+  - company: "Acme Corp"
+    title: "Senior Software Engineer"
+    location: "Austin, TX"
+    start_date: "2022-03"
+    end_date: "Present"
+    bullets:
+      - "Led migration of billing services to Kubernetes, cutting infra cost 30%."
+  - company: "Globex"
+    title: "Software Engineer"
+    location: "Remote"
+    start_date: "2019-06"
+    end_date: "2022-02"
+    bullets:
+      - "Built FastAPI services handling 2k req/s."
+
+education:
+  - school: "University of Texas at Austin"
+    degree: "Bachelor of Science"
+    field_of_study: "Computer Science"
+    start_date: "2015-08"
+    graduation_date: "2019-05"
+    gpa: ""
+
+certifications: []
+languages: ["English"]
+
+# Voluntary self-identification. Keep "Decline to self-identify" if you prefer not to answer.
+eeo:
+  gender: "Decline to self-identify"
+  hispanic_or_latino: "Decline to self-identify"
+  ethnicity: "Decline to self-identify"
+  veteran_status: "Decline to self-identify"
+  disability_status: "Decline to self-identify"
+  sexual_orientation: "Decline to self-identify"
+  pronouns: ""
+
+# Extra question -> answer pairs you want reused verbatim (matched by similar wording).
+extra_answers:
+  "Are you comfortable working in a fast-paced environment?": "Yes"
+
+files:
+  resume_pdf: "files/resume.pdf"          # relative paths are resolved inside the settings folder
+  cover_letter_pdf: null                  # optional; otherwise a tailored cover letter is generated when required

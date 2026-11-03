@@ -1,0 +1,28 @@
+# Personal runtime data (by default this lives in ~/Library/Application Support/AutoApplicator,
+# but AA_HOME can point inside the repo during development)
+data/
+logs/
+.env
+profile.yaml
+.aa-home/
+
+# Build / tooling
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+dist/
+build/
+*.dmg
+Auto Applicator.app/
+.DS_Store
+
+# Never commit stray secrets dropped into the folder
+*api_key*
+*secret*
+*.key
+*.pem
+*.p12
+
+# Local agent prompt (describes features this project deliberately doesn't include)
+AGENTS.md

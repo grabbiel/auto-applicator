@@ -1,0 +1,48 @@
+# Auto Applicator – runtime configuration (default template).
+#
+# Your personal copy lives in ~/Library/Application Support/AutoApplicator/config.yaml and is
+# created by the setup wizard. Edit that one (menu: "Open settings folder"), not this template.
+
+search_queries:
+  - keywords: "Software Engineer"
+    location: "United States"
+    workplace_type: ["Remote"]            # any of: Remote, Hybrid, On-site
+    experience_level: ["Mid-Senior level"] # Internship, Entry level, Associate, Mid-Senior level, Director, Executive
+    date_posted: "past_week"              # any, past_month, past_week, past_24h
+    include_external: false               # false = Easy Apply only; true = also company sites (Greenhouse, Lever, Ashby, Workday, other)
+    max_pages: 3                          # LinkedIn shows 25 jobs per page
+
+filters:
+  blacklist_companies: []                 # case-insensitive exact company names
+  title_must_contain: []                  # if set, the job title must contain at least one of these
+  title_exclude: []                       # skip titles containing any of these
+
+limits:
+  max_applies_per_run: 20
+  min_delay_sec: 3.0                      # random pause between actions/jobs
+  max_delay_sec: 7.0
+  otp_timeout_sec: 90                     # how long to wait for a verification email
+  max_form_steps: 12                      # safety cap on multi-page application wizards
+  max_attempts_per_job: 2                 # failed jobs are retried on later runs up to this many times
+
+# true  = fill everything, stop at the final Submit button, save a screenshot to logs/screenshots/
+# false = actually submit applications
+dry_run: true
+
+llm:
+  base_url: "http://localhost:11434/v1"   # Ollama's OpenAI-compatible endpoint
+  api_key: "ollama"
+  text_model: "qwen2.5:7b"                # 16 GB Macs: qwen2.5:7b. 32 GB+: qwen2.5:14b
+  temperature: 0.0
+  num_ctx: 8192                           # context window; a "<model>-ctx<N>" variant is created in Ollama automatically
+  request_timeout_sec: 180
+
+browser:
+  channel: "chromium"                     # "chromium" (bundled with the app) or "chrome" (your installed Google Chrome)
+  viewport_width: 1440
+  viewport_height: 900
+
+schedule:                                 # used by "Install daily schedule" (launchd)
+  hour: 9
+  minute: 30
+  weekdays_only: true

@@ -1,0 +1,25 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Jobs | LinkedIn</title>
+<style> .jobs-search-results-list { height: 400px; overflow-y: auto; width: 400px; } li { height: 120px; list-style: none; } </style></head>
+<body><main><div class="jobs-search-results-list"><ul id="list"></ul></div></main>
+<script>
+  const jobs = Array.from({length: 25}, (_, i) => ({id: String(4000000000 + i), title: `Engineer ${i}`, company: i === 3 ? 'BadCorp' : `Company ${i}`, applied: i === 5}));
+  const ul = document.getElementById('list');
+  for (const j of jobs) {
+    const li = document.createElement('li');
+    li.setAttribute('data-occludable-job-id', j.id);
+    ul.appendChild(li);
+  }
+  // Occlusion: cards only render their content once scrolled into view (like LinkedIn).
+  const io = new IntersectionObserver(entries => entries.forEach(e => {
+    if (!e.isIntersecting || e.target.dataset.hydrated) return;
+    const j = jobs.find(x => x.id === e.target.getAttribute('data-occludable-job-id'));
+    e.target.dataset.hydrated = '1';
+    e.target.innerHTML = `<div class="job-card-container" data-job-id="${j.id}">
+      <a class="job-card-list__title" href="/jobs/view/${j.id}/" aria-label="${j.title}"><strong>${j.title}</strong></a>
+      <div class="artdeco-entity-lockup__subtitle"><span>${j.company}</span></div>
+      <div class="artdeco-entity-lockup__caption"><span>Remote</span></div>
+      <footer>${j.applied ? 'Applied' : 'Easy Apply'}</footer></div>`;
+  }), {root: document.querySelector('.jobs-search-results-list')});
+  ul.querySelectorAll('li').forEach(li => io.observe(li));
+</script></body></html>

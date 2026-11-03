@@ -1,0 +1,106 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Backend Engineer | Initech | LinkedIn</title>
+<style>
+  .visually-hidden { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }
+  .jobs-easy-apply-modal { border:1px solid #333; padding:12px; margin:12px; }
+  .step { display:none; } .step.active { display:block; }
+  .artdeco-inline-feedback--error { color:#b00; }
+</style></head>
+<body>
+<main>
+  <h1>Backend Engineer</h1>
+  <div id="job-details">We build Python services on AWS. 5+ years of Python required.</div>
+  <button class="jobs-apply-button" aria-label="Easy Apply to Backend Engineer at Initech" id="ea">Easy Apply</button>
+</main>
+<div id="modal-host"></div>
+<template id="modal-tpl">
+  <div class="jobs-easy-apply-modal" role="dialog" aria-labelledby="jobs-apply-header">
+    <h2 id="jobs-apply-header">Apply to Initech</h2>
+    <button aria-label="Dismiss" id="dismiss">×</button>
+    <div role="progressbar" aria-valuenow="0" id="bar"></div>
+    <form>
+      <div class="step active" data-step="1">
+        <h3>Contact info</h3>
+        <div data-test-form-element><label for="fn">First name</label><input id="fn" required value="Jane"></div>
+        <div data-test-form-element><label for="ph">Mobile phone number</label><input id="ph" required></div>
+        <div class="jobs-document-upload-redesign-card__container jobs-document-upload-redesign-card__container--selected">Resume.pdf</div>
+        <div data-test-form-element><label for="up">Upload resume</label><input type="file" id="up" style="display:none"></div>
+        <footer><button type="button" aria-label="Continue to next step" class="next">Next</button></footer>
+      </div>
+      <div class="step" data-step="2">
+        <h3>Additional Questions</h3>
+        <div data-test-form-element><label for="sql">How many years of work experience do you have with SQL?</label>
+          <input id="sql" class="artdeco-text-input--input numeric" required></div>
+        <fieldset data-test-form-builder-radio-button-form-component aria-required="true">
+          <legend><span aria-hidden="true">Are you legally authorized to work in the United States?</span>
+                  <span class="visually-hidden">Are you legally authorized to work in the United States?</span></legend>
+          <div><input type="radio" name="auth" id="auth-y" value="Yes"><label for="auth-y">Yes</label></div>
+          <div><input type="radio" name="auth" id="auth-n" value="No"><label for="auth-n">No</label></div>
+        </fieldset>
+        <div data-test-form-element><label for="sp">Will you now or in the future require sponsorship?</label>
+          <select id="sp" required><option>Select an option</option><option>Yes</option><option>No</option></select></div>
+        <div data-test-form-element><label for="start">Desired start date (MM/DD/YYYY)</label><input id="start" required></div>
+        <div data-test-form-element class="extra"></div>
+        <footer><button type="button" aria-label="Review your application" class="next">Review</button></footer>
+      </div>
+      <div class="step" data-step="3">
+        <h3>Review your application</h3>
+        <input type="checkbox" id="follow-company-checkbox" checked><label for="follow-company-checkbox">Follow Initech</label>
+        <footer><button type="button" aria-label="Submit application" id="submit">Submit application</button></footer>
+      </div>
+    </form>
+  </div>
+</template>
+<script>
+  window.__submitted = false; window.__discarded = false; window.__followAtSubmit = null;
+  const params = new URLSearchParams(location.search);
+  document.getElementById('ea').addEventListener('click', () => {
+    const host = document.getElementById('modal-host');
+    host.innerHTML = '';
+    host.appendChild(document.getElementById('modal-tpl').content.cloneNode(true));
+    if (params.get('extra') === 'rust') {
+      host.querySelector('.extra').innerHTML = '<label for="rust">How many years of experience do you have with Rust?</label><input id="rust" required>';
+    }
+    wire(host);
+  });
+  function setError(input, msg) {
+    const c = input.closest('[data-test-form-element]');
+    c.querySelectorAll('.artdeco-inline-feedback--error').forEach(e => e.remove());
+    if (msg) { const e = document.createElement('div'); e.className = 'artdeco-inline-feedback--error'; e.textContent = msg; c.appendChild(e); }
+  }
+  function validate(step) {
+    let ok = true;
+    step.querySelectorAll('input[required]:not([type=radio]):not([type=file]), select[required]').forEach(i => {
+      let msg = '';
+      if (!i.value || i.value.startsWith('Select')) msg = 'Please enter a valid answer';
+      else if (i.classList.contains('numeric') && !/^\d+$/.test(i.value)) msg = 'Enter a whole number between 0 and 99';
+      else if (i.id === 'start' && !/^\d{2}\/\d{2}\/\d{4}$/.test(i.value)) msg = 'Enter a date in MM/DD/YYYY format';
+      setError(i, msg); if (msg) ok = false;
+    });
+    const radios = step.querySelectorAll('input[type=radio]');
+    if (radios.length && ![...radios].some(r => r.checked)) ok = false;
+    return ok;
+  }
+  function wire(host) {
+    const steps = [...host.querySelectorAll('.step')];
+    let cur = 0;
+    host.querySelectorAll('.next').forEach(b => b.addEventListener('click', () => {
+      if (!validate(steps[cur])) return;
+      steps[cur].classList.remove('active'); cur++; steps[cur].classList.add('active');
+      host.querySelector('#bar').setAttribute('aria-valuenow', String(cur * 50));
+    }));
+    host.querySelector('#submit').addEventListener('click', () => {
+      window.__submitted = true;
+      window.__followAtSubmit = host.querySelector('#follow-company-checkbox').checked;
+      host.querySelector('.jobs-easy-apply-modal').innerHTML =
+        '<h2>Application sent</h2><p>Your application was sent to Initech!</p><button>Done</button>';
+    });
+    host.querySelector('#dismiss').addEventListener('click', () => {
+      const d = document.createElement('div'); d.setAttribute('role', 'alertdialog');
+      d.innerHTML = '<p>Save this application?</p><button data-control-name="discard_application_confirm_btn">Discard</button>';
+      d.querySelector('button').addEventListener('click', () => { window.__discarded = true; host.innerHTML = ''; d.remove(); });
+      document.body.appendChild(d);
+    });
+  }
+</script>
+</body></html>
