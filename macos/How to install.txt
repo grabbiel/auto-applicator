@@ -1,30 +1,31 @@
-AUTO APPLICATOR – HOW TO INSTALL
-================================
+AUTO APPLICATOR: HOW TO INSTALL
+===============================
 
-You need: a Mac with macOS 13 or newer, 16 GB of memory, about 10 GB of free space, and an internet connection.
+You need a Mac with Apple silicon (M1 or newer) and macOS 14 Sonoma or newer.
 
 1. In this window, drag "Auto Applicator" onto the "Applications" folder next to it.
-   (Then you can close this window and eject "Auto Applicator" in the Finder sidebar.)
+   Then eject "Auto Applicator" in the Finder sidebar.
 
 2. Open your Applications folder and double-click "Auto Applicator".
 
-   The first time, your Mac says it can't check the app for malicious software (it doesn't come from the
-   App Store). This only happens once. To allow it:
-     - Open System Settings, then Privacy & Security.
+   The first time, your Mac may say it can't check the app for malicious software (it doesn't come from the
+   App Store). To allow it, once:
+     - Open System Settings > Privacy & Security.
      - Scroll down to the message about "Auto Applicator" and click "Open Anyway".
      - Enter your Mac password if asked, and click "Open Anyway" again.
-   On macOS 13 or 14 you can instead right-click the app, choose "Open", then click "Open" again.
 
-3. Click "Set up". Auto Applicator downloads what it needs (10–20 minutes the first time, in the background),
-   and walks you through everything in its own window:
-     - add your resume (it can read it and fill in your details for you),
+3. Click "Start setup". In about five minutes the app walks you through everything in its own window:
+     - add your resume (it reads it and fills in your details),
      - check your details and choose the jobs you want,
-     - sign in to LinkedIn,
+     - sign in to LinkedIn on LinkedIn's own page,
      - try a practice run (it fills in applications without sending them).
 
-After that, open Auto Applicator from your Applications folder (or the Dock) whenever you want to apply.
+After that, open Auto Applicator whenever you want to apply, or let it run by itself each day (Settings).
 
-Your details stay on your Mac. The AI runs on your Mac too – nothing is sent to an online AI service.
+YOUR DATA AND THE AI
+Your details stay on your Mac. On macOS 26 with Apple Intelligence turned on, the AI runs on your Mac with nothing
+to download. Otherwise the app can download a free AI model (about 5 GB) the first time you ask it to.
 
-To remove it: quit it, drag it from Applications to the Trash, and delete the folder
+TO REMOVE IT
+Quit it, drag it from Applications to the Trash, and delete the folder
 "Library/Application Support/AutoApplicator" in your home folder (in the Finder: Go menu > Go to Folder).

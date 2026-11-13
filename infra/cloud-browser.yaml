@@ -1,0 +1,215 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Auto Applicator cloud browser. A managed Chrome (Amazon Bedrock AgentCore Browser) the app can drive instead of
+  its built-in browser, plus a one-person sign-in (password or passkey) that hands the app short-lived AWS credentials
+  allowed to do nothing but use that browser. Idle cost is zero: the browser is billed only while a session runs.
+
+Parameters:
+  DomainPrefix:
+    Type: String
+    Description: Sign-in page address prefix (<prefix>.auth.<region>.amazoncognito.com). Must be unique in the region.
+    AllowedPattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+  AppTag:
+    Type: String
+    Default: auto-applicator
+    Description: Value of the "App" tag every resource carries; the resource group collects resources by it.
+  SignInDays:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    MaxValue: 365
+    Description: How long a sign-in lasts before the app asks again.
+
+Resources:
+  # ---- Sign-in -------------------------------------------------------------------------------------------------
+  Users:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: auto-applicator-users
+      UserPoolTier: ESSENTIALS            # passkeys need Essentials or Plus
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true     # no public sign-up: the one user is invited by scripts/deploy_cloud.sh
+        InviteMessageTemplate:
+          EmailSubject: Your Auto Applicator cloud sign-in
+          EmailMessage: >-
+            Your Auto Applicator cloud account is ready. Sign in from the app (Settings → Cloud browser) with
+            {username} and this temporary password: {####} — you'll choose your own password and can add a passkey
+            right after.
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          TemporaryPasswordValidityDays: 7
+        SignInPolicy:
+          AllowedFirstAuthFactors: [PASSWORD, WEB_AUTHN]
+      # Passkeys are bound to the sign-in domain (the default relying party). Touch ID / device password every time.
+      WebAuthnUserVerification: required
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      UserPoolTags:
+        App: !Ref AppTag
+
+  SignInDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      UserPoolId: !Ref Users
+      Domain: !Ref DomainPrefix
+      ManagedLoginVersion: 2              # the hosted pages that support passkeys
+
+  AppClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: auto-applicator-mac
+      UserPoolId: !Ref Users
+      GenerateSecret: false               # a desktop app can't keep a secret: authorization code + PKCE instead
+      ExplicitAuthFlows: [ALLOW_USER_AUTH, ALLOW_REFRESH_TOKEN_AUTH]
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows: [code]
+      AllowedOAuthScopes: [openid, email, aws.cognito.signin.user.admin]
+      CallbackURLs: ["autoapplicator://auth"]
+      LogoutURLs: ["autoapplicator://signed-out"]
+      SupportedIdentityProviders: [COGNITO]
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: !Ref SignInDays
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+      EnableTokenRevocation: true
+      PreventUserExistenceErrors: ENABLED
+
+  SignInBranding:
+    Type: AWS::Cognito::ManagedLoginBranding
+    Properties:
+      UserPoolId: !Ref Users
+      ClientId: !Ref AppClient
+      UseCognitoProvidedValues: true
+
+  # ---- Signed-in user → short-lived AWS credentials --------------------------------------------------------------
+  Identities:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      IdentityPoolName: auto_applicator_identities
+      AllowUnauthenticatedIdentities: false
+      AllowClassicFlow: false
+      CognitoIdentityProviders:
+        - ClientId: !Ref AppClient
+          ProviderName: !GetAtt Users.ProviderName
+          ServerSideTokenCheck: true      # a revoked sign-in stops getting credentials at once
+      IdentityPoolTags:
+        - Key: App
+          Value: !Ref AppTag
+
+  BrowserUserRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: "What a signed-in Auto Applicator user may do: use the cloud browser, nothing else."
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Federated: cognito-identity.amazonaws.com }
+            Action: [sts:AssumeRoleWithWebIdentity, sts:TagSession]
+            Condition:
+              StringEquals: { "cognito-identity.amazonaws.com:aud": !Ref Identities }
+              ForAnyValue:StringLike: { "cognito-identity.amazonaws.com:amr": authenticated }
+      Policies:
+        - PolicyName: use-cloud-browser
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Sessions
+                Effect: Allow
+                Action:
+                  - bedrock-agentcore:StartBrowserSession
+                  - bedrock-agentcore:SaveBrowserSessionProfile
+                Resource: [!GetAtt Browser.BrowserArn, !GetAtt BrowserProfile.ProfileArn]
+              - Sid: SessionControl
+                Effect: Allow
+                Action:
+                  - bedrock-agentcore:GetBrowserSession
+                  - bedrock-agentcore:StopBrowserSession
+                  - bedrock-agentcore:UpdateBrowserStream
+                Resource: !GetAtt Browser.BrowserArn
+              - Sid: Streams              # these actions have no resource type; a session id is still required
+                Effect: Allow
+                Action:
+                  - bedrock-agentcore:ConnectBrowserAutomationStream
+                  - bedrock-agentcore:ConnectBrowserLiveViewStream
+                  - bedrock-agentcore:ListBrowserSessions
+                Resource: "*"
+      Tags:
+        - Key: App
+          Value: !Ref AppTag
+
+  IdentityRoles:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId: !Ref Identities
+      Roles:
+        authenticated: !GetAtt BrowserUserRole.Arn
+
+  # ---- The browser ---------------------------------------------------------------------------------------------
+  Browser:
+    Type: AWS::BedrockAgentCore::BrowserCustom
+    Properties:
+      Name: auto_applicator_browser
+      Description: Chrome the Auto Applicator app drives when "Use the cloud browser" is on.
+      NetworkConfiguration:
+        NetworkMode: PUBLIC
+      RecordingConfig:
+        Enabled: false                    # application forms hold personal details: nothing is recorded
+      Tags:
+        App: !Ref AppTag
+
+  BrowserProfile:
+    Type: AWS::BedrockAgentCore::BrowserProfile
+    Properties:
+      Name: auto_applicator_profile
+      Description: Cookies kept between cloud sessions (stay signed in to LinkedIn and company sites).
+      Tags:
+        App: !Ref AppTag
+
+  # ---- Everything above, in one place in the console -----------------------------------------------------------
+  AppResources:
+    Type: AWS::ResourceGroups::Group
+    Properties:
+      Name: auto-applicator
+      Description: Everything the Auto Applicator cloud browser uses.
+      ResourceQuery:
+        Type: TAG_FILTERS_1_0
+        Query:
+          ResourceTypeFilters: [AWS::AllSupported]
+          TagFilters:
+            - Key: App
+              Values: [!Ref AppTag]
+      Tags:
+        - Key: App
+          Value: !Ref AppTag
+
+Outputs:
+  Region:
+    Value: !Ref AWS::Region
+  UserPoolId:
+    Value: !Ref Users
+  ClientId:
+    Value: !Ref AppClient
+  SignInHost:
+    Value: !Sub "${DomainPrefix}.auth.${AWS::Region}.amazoncognito.com"
+  IdentityPoolId:
+    Value: !Ref Identities
+  BrowserId:
+    Value: !GetAtt Browser.BrowserId
+  BrowserProfileId:
+    Value: !GetAtt BrowserProfile.ProfileId
+  ResourceGroup:
+    Value: !Ref AppResources
