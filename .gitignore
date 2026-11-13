@@ -2,20 +2,19 @@
 # but AA_HOME can point inside the repo during development)
 data/
 logs/
-.env
-profile.yaml
 .aa-home/
 
 # Build / tooling
-.venv/
-__pycache__/
-*.pyc
-.pytest_cache/
+.build/
+.swiftpm/
 dist/
 build/
 *.dmg
 Auto Applicator.app/
 .DS_Store
+
+# Where your cloud browser lives (scripts/deploy_cloud.sh writes it; the build bundles it). Account-specific.
+Resources/CloudConfig.json
 
 # Never commit stray secrets dropped into the folder
 *api_key*

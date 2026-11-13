@@ -1,48 +1,43 @@
 #!/bin/bash
-# Builds "Auto Applicator.app": the native macOS app (Swift, in macos/App) carrying the Python code inside it
-# (Contents/Resources/app), which it installs into ~/Library/Application Support/AutoApplicator on first launch.
-#   Usage:  bash scripts/build_app.sh [output folder]     (default: the project folder)
-# Needs the Xcode command line tools (swiftc). The people you share the app with don't need them.
+# Builds "Auto Applicator.app" (Apple silicon, macOS 14+) from the Swift package.
+#   Usage:  bash scripts/build_app.sh [output folder]     (default: build/)
+# Needs Xcode 26 or newer (its macOS SDK has Apple's on-device AI framework). The people you share the app with need
+# nothing installed.
 # Set AA_SIGN_IDENTITY="Developer ID Application: …" to sign for distribution (default: ad-hoc signature).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT_DIR="${1:-$ROOT}"
+OUT_DIR="${1:-$ROOT/build}"
 APP="$OUT_DIR/Auto Applicator.app"
-PAYLOAD="$APP/Contents/Resources/app"
-VERSION=$(awk -F'"' '/^version/ {print $2; exit}' "$ROOT/pyproject.toml")
-# Only these are bundled (an allowlist): never your settings, keys, resumes or anything else in this folder.
-INCLUDE=(README.md pyproject.toml uv.lock .python-version .env.example config.yaml profile.example.yaml aa src scripts macos)
+VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
+BUILD_NUMBER="$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)"
 
-BUILD="$(mktemp -d)"
-trap 'rm -rf "$BUILD"' EXIT
-SDK="$(xcrun --show-sdk-path)"
-for arch in arm64 x86_64; do
-  xcrun swiftc -O -parse-as-library -swift-version 5 -target "$arch-apple-macos13.0" -sdk "$SDK" \
-    "$ROOT"/macos/App/*.swift -o "$BUILD/AutoApplicator-$arch"
-done
+SDK="$(xcrun --sdk macosx --show-sdk-path)"
+if [ ! -d "$SDK/System/Library/Frameworks/FoundationModels.framework" ]; then
+  echo "This SDK ($SDK) has no FoundationModels framework: install Xcode 26 or newer (xcode-select -s …)." >&2
+  exit 1
+fi
+
+echo "Compiling (release, arm64)…"
+swift build --package-path "$ROOT" -c release --arch arm64 --product AutoApplicator
+BIN="$(swift build --package-path "$ROOT" -c release --arch arm64 --show-bin-path)/AutoApplicator"
 
 mkdir -p "$OUT_DIR"
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$PAYLOAD"
-lipo -create "$BUILD/AutoApplicator-arm64" "$BUILD/AutoApplicator-x86_64" -output "$APP/Contents/MacOS/AutoApplicator"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cp "$BIN" "$APP/Contents/MacOS/AutoApplicator"
+strip -x "$APP/Contents/MacOS/AutoApplicator"
 
-for item in "${INCLUDE[@]}"; do
-  [ -e "$ROOT/$item" ] || { echo "Missing $item"; exit 1; }
-  rsync -a --exclude '__pycache__/' --exclude '.DS_Store' --exclude '*.pyc' --exclude 'App/' "$ROOT/$item" "$PAYLOAD/"
-done
-
-# Safety net: refuse to bundle anything that looks personal or secret.
-LEAKS=$(cd "$PAYLOAD" && find . \( -name '.env' -o -name 'profile.yaml' -o -name '*.db' -o -name 'chrome_profile' \
-          -o -name '*.log' -o -iname '*key*' -o -iname '*secret*' -o -iname '*token*' -o -iname '*.pdf' \) -print)
-[ -z "$LEAKS" ] || { echo "Refusing to bundle possibly personal files:"; echo "$LEAKS"; rm -rf "$APP"; exit 1; }
-
-# A fingerprint of the bundled code: an installed copy is refreshed when it changes.
-(cd "$PAYLOAD" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256 | cut -c1-16) \
-  > "$PAYLOAD/.build-stamp"
-
-# Icon (drawn by scripts/make_icon.py; skipped if the dev environment isn't installed yet)
-if uv run --project "$ROOT" --quiet python "$ROOT/scripts/make_icon.py" "$BUILD/AppIcon.iconset" 2>/dev/null \
-   && iconutil -c icns "$BUILD/AppIcon.iconset" -o "$APP/Contents/Resources/AppIcon.icns"; then :; fi
+ICON="$ROOT/Resources/AppIcon.icns"
+[ -f "$ICON" ] || swift "$ROOT/scripts/make_icon.swift" "$ROOT/Resources"
+cp "$ICON" "$APP/Contents/Resources/AppIcon.icns"
+# The optional cloud browser's address (written by scripts/deploy_cloud.sh). AA_CLOUD_CONFIG can name another file,
+# or "none" to leave it out (a copy for other people).
+CLOUD_CONFIG="${AA_CLOUD_CONFIG:-$ROOT/Resources/CloudConfig.json}"
+if [ "$CLOUD_CONFIG" != none ] && [ -f "$CLOUD_CONFIG" ]; then
+  plutil -convert json -o /dev/null "$CLOUD_CONFIG"   # stops the build if it isn't valid JSON
+  cp "$CLOUD_CONFIG" "$APP/Contents/Resources/CloudConfig.json"
+  echo "Included the cloud browser settings."
+fi
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -58,21 +53,35 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleName</key><string>Auto Applicator</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
-  <key>CFBundleVersion</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>io.github.grabbiel.autoapplicator.run</string>
+      <key>CFBundleURLSchemes</key><array><string>autoapplicator</string></array>
+    </dict>
+  </array>
   <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
-  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSArchitecturePriority</key><array><string>arm64</string></array>
+  <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <key>LSRequiresNativeExecution</key><true/>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSHumanReadableCopyright</key><string>Runs entirely on your Mac.</string>
   <key>NSPrincipalClass</key><string>NSApplication</string>
+  <key>NSSupportsAutomaticTermination</key><false/>
+  <key>NSSupportsSuddenTermination</key><false/>
 </dict>
 </plist>
 PLIST
+plutil -lint -s "$APP/Contents/Info.plist"
 
 xattr -cr "$APP"
 if [ -n "${AA_SIGN_IDENTITY:-}" ]; then
-  codesign --force --deep --options runtime --timestamp --sign "$AA_SIGN_IDENTITY" "$APP"
+  codesign --force --options runtime --timestamp --sign "$AA_SIGN_IDENTITY" "$APP"
 else
-  codesign --force --deep --sign - "$APP"   # ad-hoc: required to run on Apple Silicon
+  codesign --force --sign - "$APP"   # ad-hoc: required to run on Apple silicon
 fi
-codesign --verify --deep --strict "$APP"
+codesign --verify --strict "$APP"
+lipo -archs "$APP/Contents/MacOS/AutoApplicator" | grep -qx arm64
 touch "$APP"
-echo "Built: $APP ($(du -sh "$APP" | cut -f1))"
+echo "Built: $APP (version $VERSION, $(du -sh "$APP" | cut -f1))"

@@ -1,0 +1,53 @@
+# Builds, tests and publishes AutoApplicator.dmg when a version tag (v1.0.0, …) is pushed. Run it by hand to get the
+# disk image as a downloadable artifact without publishing. Public builds never include a cloud browser address.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  dmg:
+    runs-on: macos-26   # Apple silicon, with Xcode 26 (its SDK has Apple's on-device AI framework)
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the build number is the commit count
+
+      - name: Use the newest Xcode
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)"
+          swift --version
+
+      - name: Test
+        run: |
+          swift build --product AutoApplicator
+          swift test --skip LiveAITests --skip 'Cloud'
+
+      - name: Check the version matches the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: test "v$(tr -d '[:space:]' < VERSION)" = "$GITHUB_REF_NAME"
+
+      - name: Build the disk image
+        env:
+          AA_CLOUD_CONFIG: none
+        run: bash scripts/package.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoApplicator-dmg
+          path: dist/AutoApplicator.dmg
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            && gh release upload "$GITHUB_REF_NAME" dist/AutoApplicator.dmg --clobber \
+            || gh release create "$GITHUB_REF_NAME" dist/AutoApplicator.dmg --title "Auto Applicator ${GITHUB_REF_NAME#v}" --generate-notes
