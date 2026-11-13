@@ -1,8 +1,9 @@
 # Personal runtime data (by default this lives in ~/Library/Application Support/AutoApplicator,
-# but AA_HOME can point inside the repo during development)
-data/
-logs/
-.aa-home/
+# but AA_HOME can point inside the repo during development). Anchored to the top: git on macOS ignores case, so a
+# bare "data/" also hid Sources/Engine/Data.
+/data/
+/logs/
+/.aa-home/
 
 # Build / tooling
 .build/
