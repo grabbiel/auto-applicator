@@ -45,10 +45,18 @@ final class AppleModel: LanguageModel, @unchecked Sendable {
 
     init() {
         // ~3.5 characters per token; leave room for the instructions, the schema and the answer.
-        promptBudget = max(6000, SystemLanguageModel.default.contextSize * 2)
+        promptBudget = max(6000, Self.contextTokens * 2)
     }
 
+    // Swift 6.4 comes with the Xcode 27 SDK. Older SDKs (the release runners have Xcode 26) lack contextSize and spell
+    // samplingMode as "sampling"; their model's window is 4096 tokens.
+    #if compiler(>=6.4)
+    private static var contextTokens: Int { SystemLanguageModel.default.contextSize }
     private var options: GenerationOptions { GenerationOptions(samplingMode: .greedy) }
+    #else
+    private static var contextTokens: Int { 4096 }
+    private var options: GenerationOptions { GenerationOptions(sampling: .greedy) }
+    #endif
 
     func prewarm() {
         LanguageModelSession().prewarm()

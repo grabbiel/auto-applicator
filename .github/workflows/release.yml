@@ -1,5 +1,7 @@
 # Builds, tests and publishes AutoApplicator.dmg when a version tag (v1.0.0, …) is pushed. Run it by hand to get the
 # disk image as a downloadable artifact without publishing. Public builds never include a cloud browser address.
+# Releases need Xcode 27 or newer. Until GitHub's Mac images have it, the run stops before building and the release
+# is built on a Mac instead (README › Releases).
 name: Release
 
 on:
@@ -12,18 +14,24 @@ permissions:
 
 jobs:
   dmg:
-    # Apple silicon with Xcode 26 (its SDK has Apple's on-device AI framework). Not macos-26: GitHub often has no free
-    # macos-26 machine, and the job fails unstarted after 15 minutes.
-    runs-on: macos-15
+    # Apple silicon, GitHub's newest image (a new Xcode arrives there first). Its machines are often busy: a job that
+    # gets none within 15 minutes fails unstarted and can simply be re-run.
+    runs-on: macos-26
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0   # the build number is the commit count
 
-      - name: Use the newest Xcode
+      - name: Use Xcode 27 or newer
         run: |
-          sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)"
+          # An Xcode 26 SDK builds a weaker app (see AppleModel.swift), so stop rather than publish one.
+          XCODE=$(ls -d /Applications/Xcode_2[7-9]*.app 2>/dev/null | grep -vi beta | sort -V | tail -1)
+          if [ -z "$XCODE" ]; then
+            echo "::error::This runner image has no Xcode 27 yet. Build the release on a Mac instead (README › Releases)."
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE"
           swift --version
 
       - name: Test

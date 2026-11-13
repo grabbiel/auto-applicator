@@ -135,7 +135,8 @@ Test it* shows what LinkedIn sees.
 
 ## For developers
 
-**Xcode 26 or newer** (its SDK has Apple's on-device AI framework). Apple silicon only.
+**Xcode 26 or newer** (its SDK has Apple's on-device AI framework); releases use Xcode 27, whose SDK also tells the
+app how much text macOS 27's on-device model accepts. Apple silicon only.
 
 ```
 Sources/Engine/          everything that isn't UI
@@ -201,3 +202,18 @@ git tag v1.0.0 && git push origin v1.0.0
 
 [`.github/workflows/release.yml`](.github/workflows/release.yml) builds and tests on macOS, packages the disk image
 (without a cloud configuration) and attaches it to a GitHub release, which the download link above always points to.
+
+It needs Xcode 27 or newer, which GitHub's Mac machines don't have yet: until they do, its run stops before building
+and publishes nothing. Build and publish from a Mac with Xcode 27 instead, after pushing the tag:
+
+```bash
+swift test --skip LiveAITests --skip Cloud
+```
+
+```bash
+AA_CLOUD_CONFIG=none bash scripts/package.sh
+```
+
+```bash
+gh release create v1.0.0 dist/AutoApplicator.dmg --title "Auto Applicator 1.0.0" --generate-notes --verify-tag
+```
