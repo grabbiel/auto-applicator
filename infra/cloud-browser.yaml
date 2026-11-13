@@ -1,14 +1,25 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   Auto Applicator cloud browser. A managed Chrome (Amazon Bedrock AgentCore Browser) the app can drive instead of
-  its built-in browser, plus a one-person sign-in (password or passkey) that hands the app short-lived AWS credentials
-  allowed to do nothing but use that browser. Idle cost is zero: the browser is billed only while a session runs.
+  its built-in browser, plus an invite-only sign-in (password, passkey, Google or Apple) that hands the app
+  short-lived AWS credentials allowed to do nothing but use that browser. Idle cost is zero: the browser is billed
+  only while a session runs.
 
 Parameters:
   DomainPrefix:
     Type: String
     Description: Sign-in page address prefix (<prefix>.auth.<region>.amazoncognito.com). Must be unique in the region.
     AllowedPattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+  # scripts/deploy_cloud.sh creates the Google and Apple providers itself (their secrets never pass through
+  # CloudFormation) and then turns these on to offer them on the sign-in page.
+  GoogleSignIn:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  AppleSignIn:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
   AppTag:
     Type: String
     Default: auto-applicator
@@ -20,6 +31,12 @@ Parameters:
     MaxValue: 365
     Description: How long a sign-in lasts before the app asks again.
 
+Conditions:
+  HasGoogle: !Equals [!Ref GoogleSignIn, "true"]
+  HasApple: !Equals [!Ref AppleSignIn, "true"]
+  HasBoth: !And [!Condition HasGoogle, !Condition HasApple]
+  HasSocial: !Or [!Condition HasGoogle, !Condition HasApple]
+
 Resources:
   # ---- Sign-in -------------------------------------------------------------------------------------------------
   Users:
@@ -30,13 +47,25 @@ Resources:
       UsernameAttributes: [email]
       AutoVerifiedAttributes: [email]
       AdminCreateUserConfig:
-        AllowAdminCreateUserOnly: true     # no public sign-up: the one user is invited by scripts/deploy_cloud.sh
+        # No public sign-up: people are invited by scripts/deploy_cloud.sh. A first Google or Apple sign-in would
+        # still create an account, so InviteGate only lets those join an invitation.
+        AllowAdminCreateUserOnly: true
         InviteMessageTemplate:
           EmailSubject: Your Auto Applicator cloud sign-in
-          EmailMessage: >-
-            Your Auto Applicator cloud account is ready. Sign in from the app (Settings → Cloud browser) with
-            {username} and this temporary password: {####} — you'll choose your own password and can add a passkey
-            right after.
+          EmailMessage: !If
+            - HasSocial
+            - !Sub
+              - >-
+                You're invited to the Auto Applicator cloud browser. In the app, open Settings → Cloud browser and
+                choose Sign in. Continue with ${Providers} using this address ({username}), or sign in with it and
+                this temporary password: {####} — you'll choose your own password and can add a passkey right after.
+              - Providers: !If [HasBoth, "Google or Apple", !If [HasGoogle, "Google", "Apple"]]
+            - >-
+              You're invited to the Auto Applicator cloud browser. In the app, open Settings → Cloud browser and
+              sign in with {username} and this temporary password: {####} — you'll choose your own password and can
+              add a passkey right after.
+      LambdaConfig:
+        PreSignUp: !GetAtt InviteGate.Arn
       Policies:
         PasswordPolicy:
           MinimumLength: 12
@@ -75,7 +104,10 @@ Resources:
       AllowedOAuthScopes: [openid, email, aws.cognito.signin.user.admin]
       CallbackURLs: ["autoapplicator://auth"]
       LogoutURLs: ["autoapplicator://signed-out"]
-      SupportedIdentityProviders: [COGNITO]
+      SupportedIdentityProviders:
+        - COGNITO
+        - !If [HasGoogle, Google, !Ref AWS::NoValue]
+        - !If [HasApple, SignInWithApple, !Ref AWS::NoValue]
       AccessTokenValidity: 60
       IdTokenValidity: 60
       RefreshTokenValidity: !Ref SignInDays
@@ -92,6 +124,115 @@ Resources:
       UserPoolId: !Ref Users
       ClientId: !Ref AppClient
       UseCognitoProvidedValues: true
+
+  # ---- Invite-only, also for Google and Apple ------------------------------------------------------------------
+  # Runs before Cognito creates an account. Invitations (made by an administrator) pass. A first Google or Apple
+  # sign-in passes only if its verified email matches an invitation, and is then joined to that invited account;
+  # anything else, including an error here, is refused.
+  InviteGate:
+    Type: AWS::Lambda::Function
+    DependsOn: InviteGateLogs
+    Properties:
+      FunctionName: auto-applicator-invite-gate
+      Description: Lets a Google or Apple sign-in in only if its email address was invited.
+      Runtime: python3.13
+      Architectures: [arm64]
+      Handler: index.handler
+      MemorySize: 128
+      Timeout: 5
+      Role: !GetAtt InviteGateRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+
+          cognito = boto3.client("cognito-idp")
+          NAMES = {"Google": "Google", "SignInWithApple": "Apple"}
+
+
+          def handler(event, context):
+              if event["triggerSource"] != "PreSignUp_ExternalProvider":
+                  return event  # an invitation itself
+              provider, _, subject = event["userName"].partition("_")
+              name = NAMES.get(provider, provider)
+              attrs = event["request"]["userAttributes"]
+              email = attrs.get("email", "").strip().lower()
+              if not email or str(attrs.get("email_verified", "")).lower() != "true" or '"' in email or "\\" in email:
+                  raise Exception(f"{name} didn't share a verified email address, so it can't be matched to an invitation.")
+              pool = event["userPoolId"]
+              users = cognito.list_users(UserPoolId=pool, Filter=f'email = "{email}"')["Users"]
+              invited = [u for u in users if u["UserStatus"] != "EXTERNAL_PROVIDER" and u["Enabled"]
+                         and {"Name": "email_verified", "Value": "true"} in u["Attributes"]]
+              if not invited:
+                  print(f"refused: {name} sign-in without an invitation")
+                  if email.endswith("@privaterelay.appleid.com"):
+                      raise Exception("Apple shared a Hide My Email address, which has no invitation. Sign in with your invited address instead.")
+                  raise Exception("The Auto Applicator cloud browser is invite-only, and this address has no invitation.")
+              cognito.admin_link_provider_for_user(
+                  UserPoolId=pool,
+                  DestinationUser={"ProviderName": "Cognito", "ProviderAttributeValue": invited[0]["Username"]},
+                  SourceUser={"ProviderName": provider, "ProviderAttributeName": "Cognito_Subject",
+                              "ProviderAttributeValue": subject},
+              )
+              print(f"joined: {name} sign-in to its invitation")
+              return event
+      Tags:
+        - Key: App
+          Value: !Ref AppTag
+
+  InviteGateLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/auto-applicator-invite-gate
+      RetentionInDays: 30
+      Tags:
+        - Key: App
+          Value: !Ref AppTag
+
+  InviteGateRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: "Auto Applicator invite gate: write its log, and (InviteGatePolicy) find and join invited accounts."
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { "aws:SourceAccount": !Ref AWS::AccountId }
+      Policies:
+        - PolicyName: write-log
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt InviteGateLogs.Arn
+      Tags:
+        - Key: App
+          Value: !Ref AppTag
+
+  # Separate from the role: the pool names the function, so the role can't name the pool without a cycle.
+  InviteGatePolicy:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: !Ref InviteGateRole
+      PolicyName: match-invitations
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: [cognito-idp:ListUsers, cognito-idp:AdminLinkProviderForUser]
+            Resource: !GetAtt Users.Arn
+
+  InviteGatePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref InviteGate
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt Users.Arn
+      SourceAccount: !Ref AWS::AccountId
 
   # ---- Signed-in user → short-lived AWS credentials --------------------------------------------------------------
   Identities:

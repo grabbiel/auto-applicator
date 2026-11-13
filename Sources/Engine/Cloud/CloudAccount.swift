@@ -10,6 +10,13 @@ public struct CloudConfig: Codable, Sendable, Equatable {
     public var identityPoolId: String
     public var browserId: String
     public var browserProfileId: String
+    /// Google and Apple, when the sign-in page offers them ("Google", "SignInWithApple"); missing in older files.
+    public var signInProviders: [String]?
+
+    /// The offered providers as people call them.
+    public var providerNames: [String] {
+        (signInProviders ?? []).map { $0 == "SignInWithApple" ? "Apple" : $0 }
+    }
 
     public static let callbackScheme = "autoapplicator"
     public static let callback = "autoapplicator://auth"
@@ -29,17 +36,38 @@ public struct CloudConfig: Codable, Sendable, Equatable {
 public enum CloudError: LocalizedError, Equatable {
     case signedOut
     case failed(String)
+    /// A first Google or Apple sign-in was just joined to its invitation; the same sign-in needs one more go.
+    case joined(provider: String)
 
     public var errorDescription: String? {
         switch self {
         case .signedOut: "Sign in to the cloud browser again (Settings → Cloud browser)."
         case .failed(let m): m
+        case .joined: "Your sign-in was joined to your invitation. Sign in once more."
         }
+    }
+
+    /// What the sign-in page reported, in words for the user.
+    static func signIn(_ error: String, description: String?) -> CloudError {
+        let text = (description ?? error).replacingOccurrences(of: "+", with: " ").trimmingCharacters(in: .whitespaces)
+        // Cognito may refuse the first Google or Apple sign-in right after the invite gate joined it to the invited
+        // account ("Already found an entry for username Google_1234"); the next attempt goes through.
+        if let range = text.range(of: "Already found an entry for username ") {
+            let provider = text[range.upperBound...].prefix { $0 != "_" }
+            if !provider.isEmpty { return .joined(provider: String(provider)) }
+        }
+        // A refusal from the invite gate arrives as "PreSignUp failed with error <its message>."
+        if let range = text.range(of: " failed with error ") {
+            var message = String(text[range.upperBound...])
+            while message.hasSuffix("..") { message.removeLast() }
+            return .failed(message)
+        }
+        return .failed(text)
     }
 }
 
-/// The one person allowed to use the cloud browser: signs in on the hosted page (password or passkey), keeps the
-/// sign-in (a refresh token, good for 30 days), and trades it for AWS credentials that can only use the browser.
+/// The invited person using the cloud browser: signs in on the hosted page (password, passkey, Google or Apple), keeps
+/// the sign-in (a refresh token, good for 30 days), and trades it for AWS credentials that can only use the browser.
 public actor CloudAccount {
     public nonisolated let config: CloudConfig
     private var refreshToken: String?
@@ -65,7 +93,8 @@ public actor CloudAccount {
         let state: String
     }
 
-    public nonisolated func signInRequest(page: String = "oauth2/authorize") -> SignInRequest {
+    /// `identityProvider` ("Google", "SignInWithApple") skips the page and goes straight to that provider.
+    public nonisolated func signInRequest(page: String = "oauth2/authorize", identityProvider: String? = nil) -> SignInRequest {
         let verifier = Self.randomURLSafe(32)
         let state = Self.randomURLSafe(16)
         let challenge = Data(SHA256.hash(data: Data(verifier.utf8))).base64URL
@@ -76,6 +105,7 @@ public actor CloudAccount {
             .init(name: "code_challenge", value: challenge), .init(name: "code_challenge_method", value: "S256"),
             .init(name: "state", value: state),
         ]
+        if let identityProvider { c.queryItems?.append(.init(name: "identity_provider", value: identityProvider)) }
         return SignInRequest(url: c.url!, verifier: verifier, state: state)
     }
 
@@ -91,7 +121,7 @@ public actor CloudAccount {
     public func completeSignIn(_ request: SignInRequest, callback: URL) async throws -> String {
         let items = URLComponents(url: callback, resolvingAgainstBaseURL: false)?.queryItems ?? []
         if let error = items.first(where: { $0.name == "error" })?.value {
-            throw CloudError.failed(items.first(where: { $0.name == "error_description" })?.value ?? error)
+            throw CloudError.signIn(error, description: items.first(where: { $0.name == "error_description" })?.value)
         }
         guard items.first(where: { $0.name == "state" })?.value == request.state else { throw CloudError.failed("The sign-in didn't match. Try again.") }
         guard let code = items.first(where: { $0.name == "code" })?.value else { throw CloudError.failed("The sign-in page didn't finish.") }

@@ -92,8 +92,8 @@ The app itself contains no personal data, so it can be shared. Settings from ver
 Runs can load pages in Chrome on AWS
 ([Amazon Bedrock AgentCore Browser](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/browser-tool.html))
 instead of in the app's own browser. This Mac still directs each run and its AI still answers the questions; only the
-browsing happens remotely. You sign in on a hosted page with an email and password, or a passkey (Touch ID / iCloud
-Keychain), and stay signed in for 30 days.
+browsing happens remotely. It's invite-only: an invited address signs in on a hosted page with its password, a
+passkey (Touch ID / iCloud Keychain), or, once you've set them up, Google or Apple, and stays signed in for 30 days.
 
 Set it up in your AWS account with an admin profile, then rebuild the app so it knows where the browser is:
 
@@ -107,20 +107,50 @@ bash scripts/build_app.sh
 
 `deploy_cloud.sh` deploys [`infra/cloud-browser.yaml`](infra/cloud-browser.yaml) (stack `auto-applicator-cloud`,
 us-east-1 by default) and writes `Resources/CloudConfig.json`, which the build bundles. That file names your
-account, so it's ignored by git. `--invite` creates the one sign-in account; Cognito emails that address a
+account, so it's ignored by git. `--invite` creates the sign-in account; Cognito emails that address a
 temporary password. Then, in the app: **Settings › Cloud browser › Sign in**, choose a new password, and
 **Add a passkey** for next time.
+
+**Invitations.** Nobody can sign up. `--invite` again resends an invitation that hasn't been used; `--invites` lists
+who's invited and how each person signs in; `--revoke` stops someone at once (`--invite` lets them back):
+
+```bash
+bash scripts/deploy_cloud.sh --invites
+```
+
+**Google and Apple.** These add *Continue with Google* and *Continue with Apple* to the sign-in page. They're still
+invite-only: a first Google or Apple sign-in works only if its verified email has an invitation, and is then joined to
+that account (password, passkey, Google and Apple all reach the same one). Apple's *Hide My Email* addresses don't
+match an invitation. You create the sign-in client at Google (free) and Apple (needs the Apple Developer Program);
+this prints exactly what to enter there:
+
+```bash
+bash scripts/deploy_cloud.sh --sign-in-setup
+```
+
+```bash
+bash scripts/deploy_cloud.sh --google <client ID>
+```
+
+```bash
+bash scripts/deploy_cloud.sh --apple <Services ID> --apple-team <team ID> --apple-key <key ID> --apple-key-file AuthKey_<key ID>.p8
+```
+
+The Google secret is typed at a hidden prompt and the Apple key is read from its file; both go to Cognito in a file
+only the script can read, never on a command line or through CloudFormation. `--google off` or `--apple off` removes
+them. Rebuild the app afterwards so Settings names them.
 
 What it creates, all tagged `App=auto-applicator` (the resource group `auto-applicator` lists them):
 
 | Resource | Purpose |
 |---|---|
-| Cognito user pool, hosted sign-in domain, app client | Sign-in with password or passkey; code + PKCE, no client secret; 30-day refresh token; no self sign-up |
+| Cognito user pool, hosted sign-in domain, app client | Sign-in with password, passkey, Google or Apple; code + PKCE, no client secret; 30-day refresh token; no self sign-up |
+| Invite gate (Lambda function, its role and a 30-day log) | Lets a first Google or Apple sign-in in only for an invited address, and joins it to that account |
 | Cognito identity pool and an IAM role | Temporary AWS credentials that can only start, use, stop and save sessions of this one browser |
 | AgentCore custom browser and browser profile | Chrome sessions; the profile keeps cookies between runs |
 
-**Cost:** nothing while idle. A session is billed only while it runs (CPU and memory per second), and Cognito is
-free for one user. Each session ends after its run, or after a timeout matched to the run's size (1–8 hours).
+**Cost:** nothing while idle. A session is billed only while it runs (CPU and memory per second), Cognito is free
+for one user, and the invite gate runs only on a first Google or Apple sign-in. Each session ends after its run, or after a timeout matched to the run's size (1–8 hours).
 
 **Remove it:**
 
