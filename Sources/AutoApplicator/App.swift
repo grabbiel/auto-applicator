@@ -99,6 +99,9 @@ struct AppCommands: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {}
+        CommandGroup(replacing: .appTermination) {
+            Button("Quit Auto Applicator") { model.quit() }.keyboardShortcut("q")
+        }
         CommandMenu("Run") {
             Button(model.settings.practiceMode ? "Start Practice Run" : "Start Applying") {
                 model.startRun(practice: model.settings.practiceMode)

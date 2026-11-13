@@ -227,7 +227,7 @@ app fills a temporary folder with sample data, saves a PNG of each screen and qu
 Bump `VERSION`, then push a matching tag:
 
 ```bash
-git tag v1.0.0 && git push origin v1.0.0
+git tag "v$(cat VERSION)" && git push origin "v$(cat VERSION)"
 ```
 
 [`.github/workflows/release.yml`](.github/workflows/release.yml) builds and tests on macOS, packages the disk image
@@ -245,5 +245,5 @@ AA_CLOUD_CONFIG=none bash scripts/package.sh
 ```
 
 ```bash
-gh release create v1.0.0 dist/AutoApplicator.dmg --title "Auto Applicator 1.0.0" --generate-notes --verify-tag
+gh release create "v$(cat VERSION)" dist/AutoApplicator.dmg --title "Auto Applicator $(cat VERSION)" --generate-notes --verify-tag
 ```
