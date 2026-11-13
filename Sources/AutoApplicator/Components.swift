@@ -743,6 +743,12 @@ extension View {
     func hairline(_ edge: Edge = .bottom) -> some View {
         overlay(alignment: edge == .bottom ? .bottom : .top) { Rectangle().fill(Palette.line).frame(height: 1) }
     }
+
+    /// Sizes a sheet to its content. Without it, macOS 15 and later can make a sheet far taller than the screen and
+    /// put its content out of reach.
+    @ViewBuilder func fittedSheet() -> some View {
+        if #available(macOS 15.0, *) { presentationSizing(.fitted) } else { self }
+    }
 }
 
 extension Date {

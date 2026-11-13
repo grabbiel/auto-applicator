@@ -53,7 +53,7 @@ struct SignInSheet: View {
             .hairline()
 
             WebViewHost(agent: model.web)
-                .frame(width: 900, height: 560)
+                .frame(height: Self.pageSize.height)
 
             HStack(spacing: 6) {
                 Image(systemName: "lock.fill").font(.system(size: 10))
@@ -67,13 +67,22 @@ struct SignInSheet: View {
             .background(Palette.surface)
             .hairline(.top)
         }
+        .frame(width: Self.pageSize.width)
         .background(Palette.canvas)
+        .fittedSheet()
         .task { await watch() }
+    }
+
+    /// LinkedIn's page area: 900 × 560 where the screen has room, less on a short one (the page scrolls inside it).
+    /// The rest leaves space for the header, the footer and the window's top edge.
+    static var pageSize: CGSize {
+        let screen = NSScreen.main?.visibleFrame.size ?? CGSize(width: 1440, height: 870)
+        return CGSize(width: min(900, screen.width - 80), height: max(300, min(560, screen.height - 260)))
     }
 
     private func watch() async {
         let web = model.web
-        try? await web.load(LinkedIn.login, timeout: 30)
+        try? await web.load(DebugHooks.signInPage ?? LinkedIn.login, timeout: 30)
         while !Task.isCancelled {
             host = web.url?.host ?? host
             if let url = web.url, url.host?.hasSuffix("linkedin.com") == true,

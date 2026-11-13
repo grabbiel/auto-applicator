@@ -634,6 +634,13 @@ final class AppModel {
 
     // MARK: - quitting
 
+    /// Quit, also from inside a sheet: macOS ignores Quit while a window has one attached (the LinkedIn sign-in).
+    func quit() {
+        showSignIn = false
+        for window in NSApp.windows { if let sheet = window.attachedSheet { window.endSheet(sheet) } }
+        DispatchQueue.main.async { NSApp.terminate(nil) }
+    }
+
     /// Ends everything the app started: the browser, the AI server, any helper process.
     func shutdown() {
         guard !didShutdown else { return }

@@ -1,6 +1,7 @@
 import AppKit
 import Engine
 import SwiftUI
+import WebKit
 
 /// Development aid: `AA_HOME=<temp dir> AA_SNAPSHOTS=<out dir>` renders every screen to PNG and quits, so the UI can be
 /// checked without clicking through it. `AA_DEMO=1` first fills the temp folder with sample data. Both refuse to run
@@ -28,7 +29,7 @@ enum DebugHooks {
                 capture(name, to: out)
             }
             model.isRunning = false  // a demo run would otherwise ask "Stop applying and quit?"
-            NSApp.terminate(nil)
+            model.quit()
         }
     }
 
@@ -94,7 +95,25 @@ enum DebugHooks {
                 scrollMain(to: 0.42)
             }))
         }
+        // The LinkedIn sign-in sheet during setup (AA_SIGNIN_PAGE swaps LinkedIn for a local page), at the default
+        // window size and at the smallest one; each logs where the sheet and the page view ended up.
+        list.append(("linkedin-sign-in", {
+            model.tourStep = nil
+            model.settings.setupComplete = false
+            model.onboardingStep = .linkedin
+            try? await Task.sleep(for: .milliseconds(300))
+            model.showSignIn = true
+            try? await Task.sleep(for: .seconds(2))
+            logLayout("default window")
+        }))
+        list.append(("linkedin-sign-in-small", {
+            mainWindow?.setContentSize(NSSize(width: 1060, height: 700))
+            try? await Task.sleep(for: .seconds(1))
+            logLayout("smallest window")
+        }))
         list.append(("dark-home", {
+            model.showSignIn = false
+            mainWindow?.setContentSize(NSSize(width: 1240, height: 820))
             model.tourStep = nil
             NSApp.appearance = NSAppearance(named: .darkAqua)
             model.page = .home
@@ -117,6 +136,26 @@ enum DebugHooks {
         editor.selectAll(nil)
         editor.insertText(text ?? "", replacementRange: editor.selectedRange())
         if text == nil { window.makeFirstResponder(nil) }
+    }
+
+    /// A local page shown in place of LinkedIn's sign-in page (only with AA_HOME, like everything here).
+    static var signInPage: URL? {
+        let env = ProcessInfo.processInfo.environment
+        guard env["AA_HOME"]?.isEmpty == false, let path = env["AA_SIGNIN_PAGE"], !path.isEmpty else { return nil }
+        return URL(fileURLWithPath: path)
+    }
+
+    /// Prints the screen, each window and the page view's frame to stderr.
+    private static func logLayout(_ label: String) {
+        func webViews(_ v: NSView) -> [WKWebView] { ((v as? WKWebView).map { [$0] } ?? []) + v.subviews.flatMap(webViews) }
+        var lines = ["[layout] \(label): screen usable \(NSScreen.main?.visibleFrame ?? .zero)"]
+        for w in NSApp.windows where w.isVisible && w.alphaValue > 0 {
+            lines.append("[layout]   window \(type(of: w)) \(w.frame)\(w.isSheet ? " (sheet)" : "")")
+            for web in w.contentView.map(webViews) ?? [] {
+                lines.append("[layout]     page view \(web.frame.size) in \(web.superview?.frame.size ?? .zero), on screen at \(w.convertToScreen(web.convert(web.bounds, to: nil)))")
+            }
+        }
+        FileHandle.standardError.write(Data((lines.joined(separator: "\n") + "\n").utf8))
     }
 
     /// Scrolls the main page to a fraction of its length (for shots of long pages).
