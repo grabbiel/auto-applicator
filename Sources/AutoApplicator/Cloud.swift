@@ -3,7 +3,8 @@ import AuthenticationServices
 import Engine
 import SwiftUI
 
-/// The optional cloud browser: signing in (password or passkey, on the hosted page), testing it, and choosing it for runs.
+/// The optional cloud browser: signing in (invited addresses only: password, passkey, Google or Apple, on the hosted
+/// page), testing it, and choosing it for runs.
 extension AppModel {
     /// This copy of the app knows where a cloud browser is (scripts/deploy_cloud.sh was run before building it).
     var cloudAvailable: Bool { cloudConfig != nil }
@@ -17,11 +18,12 @@ extension AppModel {
         if token == nil { secrets.cloudEmail = "" }
     }
 
-    func signInToCloud() async {
+    /// `provider` goes straight to Google or Apple instead of the sign-in page.
+    func signInToCloud(provider: String? = nil) async {
         guard let account = cloudAccount else { return }
         cloudBusy = "Waiting for you to sign in…"
         defer { cloudBusy = nil }
-        let request = account.signInRequest()
+        let request = account.signInRequest(identityProvider: provider)
         do {
             let callback = try await WebSignIn.shared.open(request.url)
             cloudBusy = "Finishing sign-in…"
@@ -29,9 +31,18 @@ extension AppModel {
             settings.cloudBrowser = true
             show("Signed in. Runs now use the cloud browser.")
         } catch is CancellationError {
+        } catch CloudError.joined(let joined) where provider == nil {
+            // A first Google or Apple sign-in was just joined to the invitation; the same provider lets it through now.
+            await signInToCloud(provider: joined)
         } catch {
             show(error.localizedDescription)
         }
+    }
+
+    /// How an invited person can sign in, for Settings ("Google, Apple, its password, or a passkey…").
+    var cloudSignInWays: String {
+        let providers = cloudConfig?.providerNames ?? []
+        return (providers + ["its password"]).joined(separator: ", ") + ", or a passkey once you've added one"
     }
 
     /// Opens the page that saves a passkey (Touch ID / iCloud Keychain) for the next sign-ins.
@@ -155,7 +166,7 @@ struct CloudBrowserView: View {
                         Text("Stays signed in for 30 days, then asks once more.").font(Typo.small).foregroundStyle(Palette.textSoft)
                     } else {
                         Text("Not signed in").font(Typo.bodyStrong)
-                        Text("Pages can load in Chrome on Amazon Web Services instead of on this Mac. Sign in with the account you were invited with: a password, or a passkey once you've added one.")
+                        Text("Pages can load in Chrome on Amazon Web Services instead of on this Mac. It's invite-only: sign in with the address you were invited with, using \(model.cloudSignInWays).")
                             .font(Typo.small).foregroundStyle(Palette.textSoft).fixedSize(horizontal: false, vertical: true)
                     }
                 }

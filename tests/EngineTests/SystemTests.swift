@@ -217,6 +217,35 @@ final class SigV4Tests: XCTestCase {
         XCTAssertEqual(CloudAccount.claims("h.\(payload).s")["email"] as? String, "jane@example.com")
         XCTAssertEqual(String(decoding: CloudAccount.form(["b": "x y", "a": "1/2"]), as: UTF8.self), "a=1%2F2&b=x%20y")
     }
+
+    func testSignInErrors() {
+        // The invite gate's refusal, as Cognito passes it back to the app.
+        XCTAssertEqual(CloudError.signIn("invalid_request", description: "PreSignUp+failed+with+error+This+address+has+no+invitation.."),
+                       .failed("This address has no invitation."))
+        XCTAssertEqual(CloudError.signIn("invalid_request", description: "Already found an entry for username Google_1234567890"),
+                       .joined(provider: "Google"))
+        XCTAssertEqual(CloudError.signIn("invalid_request", description: "Already+found+an+entry+for+username+SignInWithApple_001.abc"),
+                       .joined(provider: "SignInWithApple"))
+        XCTAssertEqual(CloudError.signIn("access_denied", description: nil), .failed("access_denied"))
+    }
+
+    func testSignInRequestAndProviders() throws {
+        let old = #"{"region":"us-east-1","userPoolId":"p","clientId":"c","signInHost":"h.example.com","identityPoolId":"i","browserId":"b","browserProfileId":"f"}"#
+        let config = try JSONDecoder().decode(CloudConfig.self, from: Data(old.utf8))  // a file from before Google and Apple
+        XCTAssertEqual(config.providerNames, [])
+        var both = config
+        both.signInProviders = ["Google", "SignInWithApple"]
+        XCTAssertEqual(both.providerNames, ["Google", "Apple"])
+
+        let account = CloudAccount(config: config, refreshToken: nil) { _ in }
+        func items(_ url: URL) -> [String: String] {
+            Dictionary(uniqueKeysWithValues: (URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        }
+        XCTAssertNil(items(account.signInRequest().url)["identity_provider"])
+        let google = items(account.signInRequest(identityProvider: "Google").url)
+        XCTAssertEqual(google["identity_provider"], "Google")
+        XCTAssertEqual(google["code_challenge_method"], "S256")
+    }
 }
 
 /// The cloud browser keeps cookies between sessions through its profile (needs AA_CLOUD_TEST=1 and AWS credentials).
