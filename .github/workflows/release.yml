@@ -12,7 +12,9 @@ permissions:
 
 jobs:
   dmg:
-    runs-on: macos-26   # Apple silicon, with Xcode 26 (its SDK has Apple's on-device AI framework)
+    # Apple silicon with Xcode 26 (its SDK has Apple's on-device AI framework). Not macos-26: GitHub often has no free
+    # macos-26 machine, and the job fails unstarted after 15 minutes.
+    runs-on: macos-15
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
