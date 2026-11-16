@@ -1,0 +1,60 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Jobs | LinkedIn</title>
+<style>.k4da2y { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); } button { margin: 4px; }</style></head>
+<body><main>
+<!-- LinkedIn's AI results page (/jobs/search-results/), modelled on its markup: cards are buttons keyed by the job's
+     number with generated class names, and the pager swaps the list in place (no start= in any address). -->
+<div class="k4dk8t"><div id="list"></div>
+<hr role="presentation">
+<div><button type="button" data-testid="pagination-controls-prev-button-hidden"><span>Previous</span></button>
+<ul data-testid="pagination-controls-list" id="pager"></ul>
+<button type="button" id="next" data-testid="pagination-controls-next-button-visible"><span>Next</span></button></div>
+</div>
+<!-- The selected job's details beside the list (links to it aren't results). -->
+<section class="k4dzz"><a href="https://www.linkedin.com/jobs/view/4999999999/">Similar job</a></section>
+</main>
+<script>
+const pages = [
+  [
+    {id: '4489300026', title: 'Java Full-Stack Developer', verified: true, company: 'BeaconFire Inc.', place: 'California, United States (Hybrid)', foot: ['Posted 22 hours ago', 'Be an early applicant', 'Easy Apply']},
+    {id: '4489300027', title: 'Applied Scientist', company: 'Applied Materials', place: 'Austin, TX (On-site)', foot: ['Posted 2 days ago']},
+    {id: '4489300028', title: 'Senior Software Engineer', company: 'Initech', place: 'United States (Remote)', foot: ['Applied', 'Easy Apply']},
+  ],
+  [
+    {id: '4489300031', title: 'Junior Full Stack Developer', company: 'nexacode', place: 'United States (Remote)', foot: ['Actively reviewing applicants', 'Easy Apply']},
+    {id: '4489300032', title: 'Software Engineer', company: 'Visa', place: 'Highlands Ranch, CO (On-site)', foot: ['Viewed']},
+  ],
+  [
+    {id: '4489300041', title: 'Java Developer', company: 'Capgemini', place: 'New York, NY', foot: ['Posted 3 days ago']},
+  ],
+];
+const card = j => `
+  <div role="button" tabindex="0" class="k4dk8t k4dia7" componentkey="job-card-component-ref-${j.id}">
+   <div class="k4dl5v k4divr" componentkey="job-card-component-ref-${j.id}">
+    <figure aria-hidden="true"><svg viewBox="0 0 16 16"></svg></figure>
+    <div class="k4dl5v"><div class="k4dayq" data-display-contents="true"><p class="k4dlje">${j.verified
+      ? `<span class="k4da2y">${j.title} (Verified job)</span><span aria-hidden="true">${j.title}</span>` : `<span>${j.title}</span>`}</p></div>
+     <div class="k4dlca"><p class="k4dlje">${j.company}<!-- --></p></div>
+     <p class="k4dlje">${j.place}</p></div>
+    <button type="button" aria-label="Dismiss ${j.title} job"><svg viewBox="0 0 16 16"></svg></button>
+    <div class="k4dayy">${j.foot.map(f => `<p class="k4dlje">${f}</p><p> · </p>`).join('')}</div>
+   </div>
+  </div><hr role="presentation">`;
+let current = 1;
+function show(n) {
+  current = n;
+  document.getElementById('list').innerHTML = pages[n - 1].map(card).join('');
+  document.getElementById('pager').innerHTML = pages.map((_, i) =>
+    `<li><button aria-label="Page ${i + 1}" aria-current="${i + 1 === n}" type="button" data-testid="pagination-indicator-${i}"><span>${i + 1}</span></button></li>`).join('');
+  document.getElementById('next').setAttribute('data-testid', n < pages.length ? 'pagination-controls-next-button-visible' : 'pagination-controls-next-button-hidden');
+}
+// Like LinkedIn: a short wait for the next page, with the list emptied meanwhile.
+function go(n) { document.getElementById('list').innerHTML = ''; setTimeout(() => show(n), 400); }
+document.getElementById('pager').addEventListener('click', e => {
+  const b = e.target.closest('button[aria-label^="Page "]');
+  if (b) go(parseInt(b.getAttribute('aria-label').slice(5), 10));
+});
+document.getElementById('next').addEventListener('click', () => { if (current < pages.length) go(current + 1); });
+show(1);
+</script>
+</body></html>

@@ -26,6 +26,54 @@ final class EmailTests: XCTestCase {
         XCTAssertNil(VerificationExtractor.link(in: [("Unsubscribe", "https://x.com/unsubscribe"), ("Home", "https://x.com")]))
     }
 
+    /// Workday's email (Frost, 2026) links only its logo; the activation link is written out in the text.
+    func testWorkdayActivationLinkWrittenOutInText() {
+        let raw = """
+            From: Frost Careers <frostbank@otp.workday.com>
+            To: jane.doe@example.com
+            Subject: Verify your candidate account
+            Content-Type: text/html; charset="utf-8"
+            MIME-Version: 1.0
+
+            <html><body><a href="https://wd5.myworkday.com/frostbank"><img src="https://wd5.myworkday.com/logo.png" alt=""></a>
+            <p>Click this link to confirm your email address and complete setup for your candidate account</p>
+            <p>https://frostbank.wd5.myworkdayjobs.com/External/activate/6oetwi4e4a9k/?redirect=%2Fen-US%2FExternal%2Fjob%2FR261302%2Fapply</p>
+            <p>The link will expire after 24 hours.</p></body></html>
+            """.replacingOccurrences(of: "\n", with: "\r\n")
+        let e = MIME.parse(Data(raw.utf8))
+        XCTAssertEqual(VerificationExtractor.link(in: e.links, domainHint: "workday"),
+                       "https://frostbank.wd5.myworkdayjobs.com/External/activate/6oetwi4e4a9k/?redirect=%2Fen-US%2FExternal%2Fjob%2FR261302%2Fapply")
+        XCTAssertNil(VerificationExtractor.link(in: [("", "https://wd5.myworkday.com/frostbank")], domainHint: "workday"), "a logo isn't a confirmation link")
+    }
+
+    /// A "reset your password" email: its reset link, not the logo, the privacy page or a reference number.
+    func testPasswordResetLink() async {
+        let links = [("", "https://initech.wd5.myworkdayjobs.com/en-US/Careers"),
+                     ("Reset Password", "https://initech.wd5.myworkdayjobs.com/en-US/Careers/passwordreset?token=abc123"),
+                     ("Privacy", "https://www.workday.com/privacy")]
+        XCTAssertEqual(VerificationExtractor.link(in: links, domainHint: "workday", reset: true),
+                       "https://initech.wd5.myworkdayjobs.com/en-US/Careers/passwordreset?token=abc123")
+        XCTAssertNil(VerificationExtractor.link(in: [("", "https://initech.example/activate?id=1")], reset: true), "an activation link doesn't reset")
+        var secrets = Secrets()
+        (secrets.imapUser, secrets.imapPassword, secrets.imapHost) = ("jane@example.com", "x", "imap.example.com")
+        let raw = """
+            From: Initech Careers <no-reply@initech.example>
+            To: jane@example.com
+            Subject: Reset your password
+            Date: \(HandlerTests.rfc2822(Date()))
+            Content-Type: text/plain; charset="utf-8"
+            MIME-Version: 1.0
+
+            Your reference number is 482913.
+            Reset your password here: https://careers.initech.example/reset-password?token=zz9
+            """.replacingOccurrences(of: "\n", with: "\r\n")
+        let box = FakeMailbox([Data(raw.utf8)])
+        let verifier = EmailVerifier(secrets: secrets, ai: nil, pollInterval: 0.01, openSession: { _ in box })
+        let res = await verifier.waitForVerification(senderHint: "initech", since: Date().addingTimeInterval(-30), timeout: 1, kind: .reset)
+        XCTAssertEqual(res?.url, "https://careers.initech.example/reset-password?token=zz9")
+        XCTAssertNil(res?.code)
+    }
+
     func testQuotedPrintableUnicodeMultipart() {
         let e = MIME.parse(email("unicode_multipart"))
         XCTAssertEqual(e.subject, "Votre code de vérification ✓")
@@ -46,7 +94,7 @@ final class EmailTests: XCTestCase {
         secrets.imapUser = "jane.doe@example.com"
         secrets.imapPassword = "abcdabcdabcdabcd"
         secrets.imapHost = "imap.example.com"
-        let verifier = EmailVerifier(secrets: secrets, ai: nil, pollInterval: 0.01) { _ in box }
+        let verifier = EmailVerifier(secrets: secrets, ai: nil, pollInterval: 0.01, openSession: { _ in box })
         let res = await verifier.waitForVerification(senderHint: "greenhouse", since: since, timeout: 2, kind: .code, codeLength: 8)
         XCTAssertEqual(res?.code, "nE5Cx0Ky")
         XCTAssertEqual(res?.source, "pattern")
@@ -60,7 +108,7 @@ final class EmailTests: XCTestCase {
         box.messages[0].seen = true
         var secrets = Secrets()
         (secrets.imapUser, secrets.imapPassword, secrets.imapHost) = ("jane@example.com", "x", "imap.example.com")
-        let verifier = EmailVerifier(secrets: secrets, ai: nil, pollInterval: 0.01) { _ in box }
+        let verifier = EmailVerifier(secrets: secrets, ai: nil, pollInterval: 0.01, openSession: { _ in box })
         let res = await verifier.waitForVerification(senderHint: "ashby", since: Date().addingTimeInterval(-5), timeout: 1, kind: .code)
         XCTAssertEqual(res?.code, "482913")
     }
@@ -69,7 +117,7 @@ final class EmailTests: XCTestCase {
         var secrets = Secrets()
         (secrets.imapUser, secrets.imapPassword, secrets.imapHost) = ("jane@example.com", "x", "imap.example.com")
         let box = FakeMailbox([email("other")])
-        let verifier = EmailVerifier(secrets: secrets, ai: nil, pollInterval: 0.01) { _ in box }
+        let verifier = EmailVerifier(secrets: secrets, ai: nil, pollInterval: 0.01, openSession: { _ in box })
         let res = await verifier.waitForVerification(senderHint: "workday", since: Date(), timeout: 0.2, kind: .link)
         XCTAssertNil(res)
         let none = await EmailVerifier(secrets: Secrets(), ai: nil).waitForVerification(senderHint: "x", since: Date(), timeout: 1)

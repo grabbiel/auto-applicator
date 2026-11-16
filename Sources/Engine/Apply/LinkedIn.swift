@@ -25,9 +25,12 @@ public enum LinkedIn {
     public static let login = URL(string: "https://www.linkedin.com/login")!
     static let pageSize = 25
 
-    public static func searchURL(keywords: String, search: SearchSettings, start: Int = 0) -> URL {
+    /// `geoId` is LinkedIn's number for the place in `search.location`. Signed-in searches go by it and ignore the text
+    /// alone, falling back to the location on the member's profile.
+    public static func searchURL(keywords: String, search: SearchSettings, geoId: String? = nil, start: Int = 0) -> URL {
         var c = URLComponents(string: "https://www.linkedin.com/jobs/search/")!
         var q = [URLQueryItem(name: "keywords", value: keywords), URLQueryItem(name: "location", value: search.location)]
+        if let geoId { q.append(URLQueryItem(name: "geoId", value: geoId)) }
         if !search.workplace.isEmpty { q.append(URLQueryItem(name: "f_WT", value: search.workplace.map(\.linkedInCode).joined(separator: ","))) }
         if !search.levels.isEmpty { q.append(URLQueryItem(name: "f_E", value: search.levels.map(\.linkedInCode).joined(separator: ","))) }
         if let tpr = search.datePosted.linkedInCode { q.append(URLQueryItem(name: "f_TPR", value: tpr)) }
@@ -36,6 +39,36 @@ public enum LinkedIn {
         if start > 0 { q.append(URLQueryItem(name: "start", value: String(start))) }
         c.queryItems = q
         return c.url!
+    }
+
+    /// Places LinkedIn's lookup isn't needed for.
+    static let knownPlaces = ["united states": "103644278", "united states of america": "103644278", "usa": "103644278", "us": "103644278",
+                              "estados unidos": "103644278"]
+
+    static let usStates = [
+        "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas", "CA": "California", "CO": "Colorado", "CT": "Connecticut",
+        "DE": "Delaware", "DC": "District of Columbia", "FL": "Florida", "GA": "Georgia", "HI": "Hawaii", "ID": "Idaho", "IL": "Illinois",
+        "IN": "Indiana", "IA": "Iowa", "KS": "Kansas", "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+        "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi", "MO": "Missouri", "MT": "Montana",
+        "NE": "Nebraska", "NV": "Nevada", "NH": "New Hampshire", "NJ": "New Jersey", "NM": "New Mexico", "NY": "New York",
+        "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio", "OK": "Oklahoma", "OR": "Oregon", "PA": "Pennsylvania",
+        "RI": "Rhode Island", "SC": "South Carolina", "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah",
+        "VT": "Vermont", "VA": "Virginia", "WA": "Washington", "WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming",
+    ]
+
+    /// What to ask LinkedIn's place lookup for `location`, best first: "Austin, TX" → "Austin, TX", "Austin, Texas",
+    /// "Austin" (it finds nothing for state abbreviations).
+    static func placeQueries(_ location: String) -> [String] {
+        let place = location.trimmed
+        guard !place.isEmpty else { return [] }
+        var out = [place]
+        let parts = place.split(separator: ",").map { String($0).trimmed }.filter { !$0.isEmpty }
+        if parts.count >= 2, let state = usStates[parts[1].uppercased()] {
+            out.append(([parts[0], state] + parts.dropFirst(2)).joined(separator: ", "))
+        }
+        if parts.count >= 2 { out.append(parts[0]) }
+        var seen = Set<String>()
+        return out.filter { seen.insert($0.lowercased()).inserted }
     }
 
     /// Why a job is skipped by the user's filters (nil: keep it).
@@ -47,6 +80,33 @@ public enum LinkedIn {
         let must = filters.titleMustContain.map { $0.trimmed.lowercased() }.filter { !$0.isEmpty }
         if !must.isEmpty && !must.contains(where: title.contains) { return .skippedTitleFilter }
         return nil
+    }
+
+    /// Whether a job fits the search's workplace and level choices. LinkedIn's AI results page ignores both, so they're
+    /// checked here: the workplace from the "(Remote)", "(Hybrid)" or "(On-site)" after the place (jobs without one pass),
+    /// and, when only early-career levels are chosen, titles that say they're senior.
+    public static func fits(_ card: JobCard, _ search: SearchSettings) -> Bool {
+        if let workplace = workplace(of: card.location), !search.workplace.isEmpty, !search.workplace.contains(workplace) { return false }
+        let early: Set<ExperienceLevel> = [.internship, .entry, .associate]
+        if !search.levels.isEmpty, Set(search.levels).isSubset(of: early),
+           card.title.range(of: seniorTitle, options: [.regularExpression, .caseInsensitive]) != nil { return false }
+        return true
+    }
+
+    /// Senior titles ("Member of Technical Staff" is a title at any level).
+    static let seniorTitle = #"\b(senior|sr\.?|(?<!technical )staff|principal|lead|manager|director|head of|vp|vice president|architect|distinguished|fellow|iii|iv)\b"#
+
+    /// The workplace a job's place names: "Austin, TX (Hybrid)" → hybrid; nil when it doesn't say.
+    static func workplace(of location: String) -> WorkplaceType? {
+        let place = location.trimmed.lowercased()
+        if place == "remote" || place == "en remoto" { return .remote }
+        guard let open = place.lastIndex(of: "("), place.hasSuffix(")") else { return nil }
+        switch place[place.index(after: open)..<place.index(before: place.endIndex)] {
+        case "remote", "en remoto", "remoto": return .remote
+        case "hybrid", "híbrido": return .hybrid
+        case "on-site", "on site", "presencial": return .onSite
+        default: return nil
+        }
     }
 
     static func cards(from raw: Any?) -> [JobCard] {
@@ -68,15 +128,63 @@ extension WebAgent {
         return await bool(Scripts.linkedInSignedIn)
     }
 
+    /// LinkedIn's number for a place ("United States" → 103644278), from the lookup behind its own location box.
+    /// Nil when LinkedIn doesn't know the place. Needs a LinkedIn page open (the lookup is on LinkedIn's site).
+    func linkedInGeoId(for location: String) async -> String? {
+        let place = location.trimmed
+        if let id = LinkedIn.knownPlaces[place.lowercased()] { return id }
+        for query in LinkedIn.placeQueries(place) {
+            if let id = (try? await js(Scripts.linkedInPlace, ["query": query])) as? String, !id.isEmpty { return id }
+        }
+        return nil
+    }
+
     /// One page of search results (25 jobs), scrolled so every card renders.
-    func searchPage(keywords: String, search: SearchSettings, page: Int) async throws -> [JobCard] {
-        try await load(LinkedIn.searchURL(keywords: keywords, search: search, start: page * LinkedIn.pageSize))
-        guard await waitFor("[data-occludable-job-id], [data-job-id]", timeout: 15) else {
-            Log.info("No job cards on page \(page + 1) for \"\(keywords)\"")
+    func searchPage(keywords: String, search: SearchSettings, geoId: String?, page: Int) async throws -> [JobCard] {
+        try await load(LinkedIn.searchURL(keywords: keywords, search: search, geoId: geoId, start: page * LinkedIn.pageSize))
+        let found = await waitFor(Scripts.jobCardSelector, timeout: 15)
+        // LinkedIn can end the session mid-run (it does when a sign-in moves far, e.g. to the cloud browser); its public
+        // pages still list jobs, but Easy Apply and the filters need the sign-in.
+        if await bool(Scripts.linkedInSignedOutPage) { throw RunError.signedOut }
+        guard found else {
+            let place = url.map { "\($0.host ?? "")\($0.path)" } ?? "?"
+            let title = await string("return document.title")
+            Log.info("No job cards on page \(page + 1) for \"\(keywords)\" (\(place): \(title))")
+            return []
+        }
+        guard try await showResultsPage(page + 1) else {
+            Log.info("No page \(page + 1) of results for \"\(keywords)\"")
             return []
         }
         _ = try? await js(Scripts.scrollJobList, ["step": 300])
         return LinkedIn.cards(from: try? await js(Scripts.jobCards))
+    }
+
+    /// LinkedIn's AI results page (where /jobs/search/ now leads) ignores `start` and pages with buttons: moves its pager to
+    /// `page` (1-based). True once the page shows, false when there's no such page; true on the other layouts, where the
+    /// address already chose the page.
+    func showResultsPage(_ page: Int) async throws -> Bool {
+        var now = ((try? await js(Scripts.resultsPage)) as? Int) ?? -1
+        if now < 0 { return true }
+        var clicks = 0
+        while now < page {
+            guard clicks < page + 2, await bool(Scripts.tagPagerButton, ["page": page]) else { return false }
+            clicks += 1
+            let first = await string(Scripts.firstResult)
+            guard await click("[data-auto-page]") else { return false }
+            // The list redraws in place: wait for the pager to move on and the cards to change.
+            let deadline = Date().addingTimeInterval(15)
+            var moved = false
+            while Date() < deadline, !moved {
+                try await sleep(0.3)
+                let shown = ((try? await js(Scripts.resultsPage)) as? Int) ?? -1
+                let top = await string(Scripts.firstResult)
+                if shown > now, !top.isEmpty, top != first { now = shown; moved = true }
+            }
+            guard moved else { return false }
+        }
+        try await sleep(0.5)
+        return now == page
     }
 
     struct JobDetails {
@@ -89,6 +197,7 @@ extension WebAgent {
         try await load(card.url)
         await waitFor("main", timeout: 15)
         try await sleep(1.5)
+        if await bool(Scripts.linkedInSignedOutPage) { throw RunError.signedOut }
         return try await readJobDetails()
     }
 
@@ -112,10 +221,16 @@ extension WebAgent {
         func left() -> Bool { url?.host?.contains("linkedin.com") == false || (url != start && url?.path.contains("/jobs/view/") == false) }
         var waited = 0.0
         while waited < 8, !left() { try await sleep(0.25); waited += 0.25 }
-        if !left(), await findButton(#"^(continue|apply|continue to apply)$"#, root: "[role=dialog]") != nil {
+        // A dialog first: "Continue to apply", or the "Job search safety reminder" with "Continue applying" (not always
+        // marked as a dialog, so last the whole page, for that wording only).
+        let inDialog = #"^(continue|apply|continue to apply|continue applying|apply on company (site|website)|go to (the )?(company )?(site|website)|continuar|continuar con la solicitud|seguir solicitando|solicitar)$"#
+        for (pattern, root) in [(inDialog, "[role=dialog]"), (inDialog, "dialog[open]"), (inDialog, "[aria-modal=true]"), (inDialog, ".artdeco-modal"),
+                                (#"^(continue applying|continue to apply|seguir solicitando)$"#, nil)] as [(String, String?)] where !left() {
+            guard await findButton(pattern, root: root) != nil else { continue }
             await clickFoundButton()
             waited = 0
             while waited < 8, !left() { try await sleep(0.25); waited += 0.25 }
+            break
         }
         guard left() else { throw BrowserError("The Apply button didn't open the company's site.") }
         try await waitForRedirects(timeout: timeout)

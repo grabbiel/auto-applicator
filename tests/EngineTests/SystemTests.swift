@@ -3,6 +3,29 @@ import XCTest
 @testable import Engine
 
 final class SystemTests: XCTestCase {
+    /// A run the app quit in the middle of (the job in progress didn't wind down in time to write the run's end) is
+    /// closed from the jobs it touched; a finished run is left as it was.
+    func testUnfinishedRunIsClosedFromItsJobs() throws {
+        let home = try TestHome()
+        let done = home.db.startRun(practice: true)
+        home.db.finishRun(done, sent: 0, prepared: 7, needsAnswer: 0, failed: 0, note: "Reached the limit.")
+        Thread.sleep(forTimeInterval: 1.1)
+        let open = home.db.startRun(practice: true)
+        home.db.upsertJob("1", status: .practiceComplete, title: "A", company: "Acme")
+        home.db.upsertJob("2", status: .failedForm, title: "B", company: "Initech")
+        home.db.upsertJob("3", status: .needsAnswer, title: "C", company: "Hooli")
+        home.db.upsertJob("4", status: .failedOTPTimeout, title: "D", company: "Umbrella")
+        home.db.closeUnfinishedRuns(note: "Stopped.")
+        let runs = home.db.recentRuns()
+        let last = try XCTUnwrap(runs.first { $0.id == open })
+        XCTAssertNotNil(last.finishedAt)
+        XCTAssertEqual([last.prepared, last.failed, last.needsAnswer, last.sent], [1, 2, 1, 0])
+        XCTAssertEqual(last.note, "Stopped.")
+        let first = try XCTUnwrap(runs.first { $0.id == done })
+        XCTAssertEqual([first.prepared, first.failed], [7, 0])
+        XCTAssertEqual(first.note, "Reached the limit.")
+    }
+
     func testSchedulePlist() {
         var s = Schedule()
         s.hour = 8
@@ -16,6 +39,9 @@ final class SystemTests: XCTestCase {
         s.weekdaysOnly = false
         XCTAssertEqual((Scheduler.plist(s, logs: URL(fileURLWithPath: "/tmp"))["StartCalendarInterval"] as? [[String: Int]]), [["Hour": 8, "Minute": 5]])
         XCTAssertEqual(s.summary, "Every day at 8:05 AM")
+        let named = Scheduler.plist(s, logs: URL(fileURLWithPath: "/tmp"), app: URL(fileURLWithPath: "/Applications/Auto Applicator.app"))
+        XCTAssertEqual(named["ProgramArguments"] as? [String],
+                       ["/usr/bin/open", "-g", "-a", "/Applications/Auto Applicator.app", "autoapplicator://scheduled-run?token=abc"])
     }
 
     /// The supervisor ends its helper (and the helper's children) when the app it watches goes away.
@@ -251,6 +277,61 @@ final class SigV4Tests: XCTestCase {
 /// The cloud browser keeps cookies between sessions through its profile (needs AA_CLOUD_TEST=1 and AWS credentials).
 @MainActor
 final class CloudSessionTests: XCTestCase {
+    /// A person at the controls (the LinkedIn sign-in sheet): the live picture, clicks, typing, editing keys, scrolling,
+    /// and clearing a site's cookies.
+    func testPersonAtTheControls() async throws {
+        let web = try await makeCloudTestAgent()
+        let cloud = try XCTUnwrap(web.cloud)
+        defer { Task { @MainActor in await cloud.stop(saveProfile: false) } }
+        try await web.loadTestHTML(#"""
+            <html><body style="margin:0">
+            <input id="email" style="position:absolute; left:100px; top:100px; width:300px; height:30px">
+            <input id="pw" type="password" style="position:absolute; left:100px; top:160px; width:300px; height:30px">
+            <div style="height:3000px"></div>
+            </body></html>
+            """#, base: URL(string: "https://controls.test/")!)
+
+        var frames = 0
+        var frameSize = CGSize.zero
+        try await cloud.startScreencast { _, size in frames += 1; frameSize = size }
+        for _ in 0..<20 where frames == 0 { try await Task.sleep(for: .milliseconds(250)) }
+        XCTAssertGreaterThan(frames, 0, "a picture of the page arrived")
+        XCTAssertEqual(frameSize.width, WebAgent.viewport.width, accuracy: 1)
+
+        func value(_ id: String) async -> String { await web.string("return document.getElementById(id).value", ["id": id]) }
+        await cloud.mouse(.move, at: CGPoint(x: 150, y: 115))
+        await cloud.mouse(.down, at: CGPoint(x: 150, y: 115))
+        await cloud.mouse(.up, at: CGPoint(x: 150, y: 115))
+        await cloud.typeText("jane@exampel.com")
+        for _ in 0..<7 { await cloud.press(.backspace) }
+        await cloud.typeText("ple.com")
+        var email = await value("email")
+        XCTAssertEqual(email, "jane@example.com")
+        await cloud.press(.selectAll)
+        await cloud.typeText("joe@example.com")
+        email = await value("email")
+        XCTAssertEqual(email, "joe@example.com", "Select All, then typing, replaces the text")
+        await cloud.press(CloudBrowser.EditKey.tab)
+        await cloud.typeText("pässwörd 1")
+        let password = await value("pw")
+        XCTAssertEqual(password, "pässwörd 1", "Tab moves on; accented letters arrive as typed")
+
+        await cloud.scroll(at: CGPoint(x: 600, y: 400), dx: 0, dy: 500)
+        try await Task.sleep(for: .milliseconds(600))
+        let scrolled = await web.string("return String(Math.round(window.scrollY))")
+        XCTAssertGreaterThan(Int(scrolled) ?? 0, 100)
+        await cloud.stopScreencast()
+
+        let cookie = HTTPCookie(properties: [.name: "aa_clear_probe", .value: "1", .domain: ".example.com", .path: "/", .secure: "TRUE",
+                                             .expires: Date().addingTimeInterval(600)])!
+        await cloud.setCookies([cookie])
+        var names = await cloud.cookies(for: "example.com").map(\.name)
+        XCTAssertTrue(names.contains("aa_clear_probe"))
+        await cloud.clearCookies(domain: "example.com")
+        names = await cloud.cookies(for: "example.com").map(\.name)
+        XCTAssertFalse(names.contains("aa_clear_probe"))
+    }
+
     func testProfileKeepsCookiesBetweenSessions() async throws {
         let probe = try await makeCloudTestAgent()  // checks the environment; no profile
         await probe.cloud?.stop(saveProfile: false)

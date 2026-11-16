@@ -25,6 +25,49 @@ final class ScraperTests: XCTestCase {
         XCTAssertFalse(names.contains("start"))
     }
 
+    func testSearchURLCarriesThePlace() {
+        let url = LinkedIn.searchURL(keywords: "iOS Engineer", search: SearchSettings(), geoId: "103644278")
+        let items = Dictionary(uniqueKeysWithValues: URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems!.map { ($0.name, $0.value!) })
+        XCTAssertEqual(items["location"], "United States")
+        XCTAssertEqual(items["geoId"], "103644278")
+    }
+
+    func testPlaceLookups() {
+        XCTAssertEqual(LinkedIn.placeQueries("Austin, TX"), ["Austin, TX", "Austin, Texas", "Austin"])
+        XCTAssertEqual(LinkedIn.placeQueries(" Lima, Peru "), ["Lima, Peru", "Lima"])
+        XCTAssertEqual(LinkedIn.placeQueries("Germany"), ["Germany"])
+        XCTAssertEqual(LinkedIn.placeQueries("  "), [])
+        XCTAssertEqual(LinkedIn.knownPlaces["united states"], "103644278")
+    }
+
+    /// LinkedIn's AI results page ignores the workplace and level filters, so the run checks them on each card.
+    func testWorkplaceAndLevelFit() {
+        var search = SearchSettings()
+        search.workplace = [.onSite, .hybrid]
+        search.levels = [.associate, .entry]
+        func card(_ title: String, _ location: String) -> JobCard { JobCard(id: "1", title: title, company: "Acme", location: location, applied: false) }
+        XCTAssertTrue(LinkedIn.fits(card("Software Engineer", "Austin, TX (Hybrid)"), search))
+        XCTAssertTrue(LinkedIn.fits(card("Software Engineer", "Highlands Ranch, CO (On-site)"), search))
+        XCTAssertTrue(LinkedIn.fits(card("Software Engineer", "Tampa, FL"), search))  // doesn't say: kept
+        XCTAssertFalse(LinkedIn.fits(card("Software Engineer", "United States (Remote)"), search))
+        XCTAssertFalse(LinkedIn.fits(card("Senior Software Engineer", "Austin, TX (Hybrid)"), search))
+        XCTAssertFalse(LinkedIn.fits(card("Sr. iOS Engineer", "Austin, TX"), search))
+        XCTAssertFalse(LinkedIn.fits(card("Software Engineer III", "Austin, TX"), search))
+        XCTAssertFalse(LinkedIn.fits(card("Engineering Manager", "Austin, TX"), search))
+        XCTAssertTrue(LinkedIn.fits(card("Leadership Development Engineer", "Austin, TX"), search))
+        XCTAssertTrue(LinkedIn.fits(card("Mobile Engineer (Member of Technical Staff)", "San Francisco, CA (On-site)"), search))
+        XCTAssertFalse(LinkedIn.fits(card("Staff iOS Developer Experience Engineer - Slack", "Bellevue, WA (Hybrid)"), search))
+        XCTAssertTrue(LinkedIn.fits(card("Associate Software Engineer – Full Stack", "Houston, TX (Hybrid)"), search))
+
+        search.levels = [.entry, .midSenior]  // senior titles are wanted now
+        XCTAssertTrue(LinkedIn.fits(card("Senior Software Engineer", "Austin, TX"), search))
+        search.workplace = []
+        XCTAssertTrue(LinkedIn.fits(card("Software Engineer", "United States (Remote)"), search))
+        XCTAssertEqual(LinkedIn.workplace(of: "Remote"), .remote)
+        XCTAssertEqual(LinkedIn.workplace(of: "Lima, Perú (Híbrido)"), .hybrid)
+        XCTAssertNil(LinkedIn.workplace(of: "New York City Metropolitan Area"))
+    }
+
     func testFilters() {
         let f = Filters(blacklistCompanies: ["BadCorp"], titleMustContain: ["engineer"], titleExclude: ["Manager"])
         func card(_ title: String, _ company: String = "Good") -> JobCard { JobCard(id: "1", title: title, company: company, location: "Remote", applied: false) }

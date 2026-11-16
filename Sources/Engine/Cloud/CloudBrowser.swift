@@ -25,6 +25,7 @@ public final class CloudBrowser {
     private var isolatedContext: Int?
     private var handledPopups: Set<String> = []
     private var responder: ((URL) -> (body: Data, mime: String)?)?
+    private var screencast: ((NSImage, CGSize) -> Void)?
 
     public private(set) var url: URL?
     public private(set) var isLoading = false
@@ -279,6 +280,13 @@ public final class CloudBrowser {
                     _ = try? await self.call("Fetch.continueRequest", ["requestId": id])
                 }
             }
+        case "Page.screencastFrame" where onPage:
+            if let ack = params["sessionId"] { Task { _ = try? await self.call("Page.screencastFrameAck", ["sessionId": ack]) } }
+            guard let screencast, let b64 = params["data"] as? String, let data = Data(base64Encoded: b64), let image = NSImage(data: data) else { return }
+            let meta = params["metadata"] as? [String: Any] ?? [:]
+            let size = CGSize(width: (meta["deviceWidth"] as? NSNumber)?.doubleValue ?? WebAgent.viewport.width,
+                              height: (meta["deviceHeight"] as? NSNumber)?.doubleValue ?? WebAgent.viewport.height)
+            screencast(image, size)
         case "Page.javascriptDialogOpening" where onPage:
             // Accept alerts and confirmations, keep a prompt's default (as the built-in browser does).
             let text = params["defaultPrompt"] as? String ?? ""
@@ -325,6 +333,7 @@ public final class CloudBrowser {
         let declarations = args.keys.sorted().map { "const \($0) = __a[\"\($0)\"];" }.joined(separator: " ")
         let expression = """
             (async () => { const __a = \(argJSON); \(declarations)
+            \(Scripts.deepDocument)
             const __r = await (async () => { \(body) })(); return __r === undefined ? null : __r; })()
             """
         for attempt in 0..<2 {
@@ -380,6 +389,101 @@ public final class CloudBrowser {
         if let text { down["text"] = text; down["unmodifiedText"] = text }
         try await call("Input.dispatchKeyEvent", down)
         try await call("Input.dispatchKeyEvent", ["type": "keyUp", "key": name, "code": name, "windowsVirtualKeyCode": code, "nativeVirtualKeyCode": code])
+    }
+
+    // MARK: a person at the controls (signing in to a site inside the cloud browser)
+
+    /// Sends the page's picture to `onFrame` as it changes, with the page's size in its own coordinates (for mapping
+    /// clicks back).
+    public func startScreencast(onFrame: @escaping (NSImage, CGSize) -> Void) async throws {
+        screencast = onFrame
+        try await call("Page.startScreencast", ["format": "jpeg", "quality": 75,
+                                                "maxWidth": Int(WebAgent.viewport.width), "maxHeight": Int(WebAgent.viewport.height)])
+    }
+
+    public func stopScreencast() async {
+        screencast = nil
+        _ = try? await call("Page.stopScreencast", timeout: 5)
+    }
+
+    public enum MouseAction: String, Sendable { case down = "mousePressed", up = "mouseReleased", move = "mouseMoved" }
+
+    /// A mouse event at a point in page coordinates (`pressed`: the button is held, for drags).
+    public func mouse(_ action: MouseAction, at p: CGPoint, clickCount: Int = 1, pressed: Bool = false) async {
+        var event: [String: Any] = ["type": action.rawValue, "x": p.x, "y": p.y]
+        if action != .move {
+            event["button"] = "left"
+            event["clickCount"] = clickCount
+        }
+        event["buttons"] = action == .down || pressed ? 1 : 0
+        _ = try? await call("Input.dispatchMouseEvent", event, timeout: 10)
+    }
+
+    public func scroll(at p: CGPoint, dx: Double, dy: Double) async {
+        _ = try? await call("Input.dispatchMouseEvent", ["type": "mouseWheel", "x": p.x, "y": p.y, "deltaX": dx, "deltaY": dy], timeout: 10)
+    }
+
+    /// Types text where the focus is (as a keyboard would, without key codes).
+    public func typeText(_ text: String) async {
+        _ = try? await call("Input.insertText", ["text": text], timeout: 10)
+    }
+
+    /// One character as a key press (keydown, keypress, input, keyup), for boxes that only take what's typed on a
+    /// keyboard (Oracle's one-digit code boxes); insertText sends no key events.
+    public func typeKey(_ ch: Character) async {
+        let s = String(ch)
+        var key: [String: Any] = ["key": s]
+        if let a = ch.asciiValue, ch.isNumber || ch.isLetter {
+            let upper = Character(s.uppercased()).asciiValue ?? a
+            key["code"] = ch.isNumber ? "Digit\(s)" : "Key\(s.uppercased())"
+            key["windowsVirtualKeyCode"] = Int(ch.isNumber ? a : upper)
+            key["nativeVirtualKeyCode"] = Int(ch.isNumber ? a : upper)
+        }
+        var down = key
+        down["type"] = "keyDown"
+        down["text"] = s
+        down["unmodifiedText"] = s
+        _ = try? await call("Input.dispatchKeyEvent", down, timeout: 10)
+        var up = key
+        up["type"] = "keyUp"
+        _ = try? await call("Input.dispatchKeyEvent", up, timeout: 10)
+    }
+
+    public enum EditKey: Sendable { case backspace, delete, enter, tab, backtab, escape, left, right, up, down, home, end, selectAll }
+
+    public func press(_ key: EditKey) async {
+        let (name, code): (String, Int) = switch key {
+        case .backspace: ("Backspace", 8)
+        case .delete: ("Delete", 46)
+        case .enter: ("Enter", 13)
+        case .tab, .backtab: ("Tab", 9)
+        case .escape: ("Escape", 27)
+        case .left: ("ArrowLeft", 37)
+        case .right: ("ArrowRight", 39)
+        case .up: ("ArrowUp", 38)
+        case .down: ("ArrowDown", 40)
+        case .home: ("Home", 36)
+        case .end: ("End", 35)
+        case .selectAll: ("a", 65)
+        }
+        var down: [String: Any] = ["type": "rawKeyDown", "key": name, "code": key == .selectAll ? "KeyA" : name,
+                                   "windowsVirtualKeyCode": code, "nativeVirtualKeyCode": code]
+        if key == .enter { down["type"] = "keyDown"; down["text"] = "\r"; down["unmodifiedText"] = "\r" }
+        if key == .backtab { down["modifiers"] = 8 }
+        if key == .selectAll { down["modifiers"] = 2; down["commands"] = ["selectAll"] }  // Ctrl: the cloud Chrome runs on Linux
+        _ = try? await call("Input.dispatchKeyEvent", down, timeout: 10)
+        var up: [String: Any] = ["type": "keyUp", "key": name, "code": down["code"] ?? name, "windowsVirtualKeyCode": code, "nativeVirtualKeyCode": code]
+        if let modifiers = down["modifiers"] { up["modifiers"] = modifiers }
+        _ = try? await call("Input.dispatchKeyEvent", up, timeout: 10)
+    }
+
+    /// Deletes this browser's cookies for `domain` (and its subdomains), e.g. an old LinkedIn sign-in.
+    public func clearCookies(domain: String) async {
+        guard let r = try? await call("Storage.getCookies", onPage: false), let list = r["cookies"] as? [[String: Any]] else { return }
+        for c in list {
+            guard let name = c["name"] as? String, let host = c["domain"] as? String, host.hasSuffix(domain) else { continue }
+            _ = try? await call("Network.deleteCookies", ["name": name, "domain": host, "path": c["path"] as? String ?? "/"])
+        }
     }
 
     func screenshot() async -> NSImage? {

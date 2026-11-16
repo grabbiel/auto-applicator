@@ -24,7 +24,10 @@ struct RootView: View {
                     .id(toast.id)
             }
         }
-        .sheet(isPresented: $model.showSignIn) { SignInSheet() }
+        .sheet(isPresented: $model.showSignIn) {
+            // Runs in the cloud need a LinkedIn sign-in made there (LinkedIn ends one copied from this Mac).
+            if model.usesCloud { CloudSignInSheet() } else { SignInSheet() }
+        }
         .background(WindowAccessor())
         .tint(Palette.green)
     }

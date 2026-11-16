@@ -128,7 +128,11 @@ final class AppModel {
     @ObservationIgnored private(set) var ai: AIService?
 
     // LinkedIn
-    var linkedInState: LinkedInState = .unknown
+    /// The built-in browser's LinkedIn sign-in.
+    var localLinkedIn: LinkedInState = .unknown
+    /// The sign-in runs use: the cloud browser's own when runs go there (made inside it; see CloudSignInSheet), else
+    /// the built-in browser's.
+    var linkedInState: LinkedInState { usesCloud ? (settings.cloudLinkedIn ? .signedIn : .signedOut) : localLinkedIn }
     var showSignIn = false
 
     // email codes
@@ -138,6 +142,8 @@ final class AppModel {
     // cloud browser (see Cloud.swift)
     @ObservationIgnored let cloudConfig: CloudConfig?
     @ObservationIgnored private(set) var cloudAccount: CloudAccount?
+    /// The cloud session the LinkedIn sign-in sheet is showing (ended when the app quits).
+    @ObservationIgnored var signInCloud: CloudBrowser?
     var cloudBusy: String?
     var cloudTest: CloudTest?
     /// The current (or last) run uses the cloud browser.
@@ -160,6 +166,7 @@ final class AppModel {
         store = Store(paths: paths)
         let migration = LegacyMigration.runIfNeeded(paths: paths)
         db = Self.openDatabase(paths)
+        db.closeUnfinishedRuns(note: "Stopped: the app closed during the run.")
         ollama = OllamaManager(paths: paths)
         profile = store.loadProfile() ?? Profile()
         settings = store.loadSettings()
@@ -177,6 +184,11 @@ final class AppModel {
         }
         if migration.migrated && settings.schedule.enabled { applySchedule() }
         installedSchedule = Scheduler.isInstalled ? settings.schedule : nil
+        // A schedule from before it named the app (or naming a copy that's gone) opens this copy from now on.
+        if settings.schedule.enabled, Scheduler.isInstalled, let app = Self.thisApp, ProcessInfo.processInfo.environment["AA_HOME"] == nil,
+           Scheduler.scheduledApp.map({ !FileManager.default.fileExists(atPath: $0.path) }) ?? true {
+            try? Scheduler.install(settings.schedule, paths: paths, app: app)
+        }
         // Set up before (or carried over from 0.3) but never shown the tour.
         if settings.setupComplete && !settings.tourComplete { tourStep = 0 }
         refreshData()
@@ -256,19 +268,19 @@ final class AppModel {
     // MARK: - questions and memory
 
     func answer(_ q: PendingQuestion, with text: String) {
-        let answer = text.trimmed
-        guard !answer.isEmpty else { return }
-        db.resolvePending(q.hash, answer: answer)
-        if let skill = Memory.learnedSkill(question: q.question, answer: answer) {
-            profile.experienceYears[skill.skill] = skill.years
-        }
+        guard !text.trimmed.isEmpty else { return }
+        var updated = profile
+        let answered = QuestionGroups.answer(q, with: text, db: db, profile: &updated)
+        profile = updated
         refreshData()
-        show("Learned. It'll use that answer from now on.", symbol: "brain")
+        show(answered > 1 ? "Learned. That answered \(answered) questions, and it'll use it from now on."
+                          : "Learned. It'll use that answer from now on.", symbol: "brain")
     }
 
-    func dismiss(_ q: PendingQuestion) {
-        db.dismissPending(q.hash)
+    func decline(_ q: PendingQuestion) {
+        QuestionGroups.decline(q, db: db)
         refreshData()
+        show("Okay. Jobs that require it are skipped from now on.", symbol: "nosign")
     }
 
     func edit(_ a: CachedAnswer, answer: String) {
@@ -302,6 +314,13 @@ final class AppModel {
     func removeJob(_ job: JobRecord) {
         db.deleteJob(job.id)
         refreshData()
+    }
+
+    /// Lets the next run try a job again after it gave up on it.
+    func retryJob(_ job: JobRecord) {
+        db.resetAttempts(job.id)
+        refreshData()
+        show("The next run will try it again.", symbol: "arrow.clockwise")
     }
 
     // MARK: - resume
@@ -405,12 +424,13 @@ final class AppModel {
     func refreshLinkedIn() async {
         let cookies = await WKWebsiteDataStore.default().httpCookieStore.allCookies()
         let ok = cookies.contains { $0.name == "li_at" && $0.domain.hasSuffix("linkedin.com") && ($0.expiresDate ?? .distantFuture) > Date() }
-        linkedInState = ok ? .signedIn : .signedOut
+        localLinkedIn = ok ? .signedIn : .signedOut
     }
 
     func signOutOfLinkedIn() async {
+        if usesCloud { await signOutOfCloudLinkedIn(); return }
         await WebAgent.clearWebsiteData()
-        linkedInState = .signedOut
+        localLinkedIn = .signedOut
         show("Signed out of LinkedIn.")
     }
 
@@ -437,7 +457,7 @@ final class AppModel {
         installedSchedule = schedule
         if schedule.enabled {
             do {
-                try Scheduler.install(schedule, paths: paths)
+                try Scheduler.install(schedule, paths: paths, app: Self.thisApp)
                 Notifier.requestPermission()
             } catch {
                 show(error.localizedDescription, symbol: "exclamationmark.triangle.fill", tone: .red)
@@ -446,6 +466,9 @@ final class AppModel {
             Scheduler.remove()
         }
     }
+
+    /// This copy of the app, for the schedule to open (nil when not running from an app bundle).
+    static var thisApp: URL? { Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main.bundleURL : nil }
 
     var nextScheduledRun: Date? {
         let s = settings.schedule
@@ -533,11 +556,13 @@ final class AppModel {
                 self.lastSummary = summary
                 self.finishNotification(summary)
             } catch RunError.signedOut {
-                await self.refreshLinkedIn()
-                self.runError = self.runInCloud && self.linkedInState == .signedIn
-                    ? "LinkedIn asked the cloud browser to sign in again. Sign out of LinkedIn and back in (Settings › LinkedIn), then try again, or turn the cloud browser off."
-                    : RunError.signedOut.localizedDescription
-                if !self.runInCloud { self.linkedInState = .signedOut }
+                if self.runInCloud {
+                    self.settings.cloudLinkedIn = false
+                    self.runError = "LinkedIn signed the cloud browser out. Sign in to LinkedIn again (Settings › LinkedIn), then try again."
+                } else {
+                    self.localLinkedIn = .signedOut
+                    self.runError = RunError.signedOut.localizedDescription
+                }
             } catch {
                 self.runError = error.localizedDescription
             }
@@ -648,7 +673,10 @@ final class AppModel {
         saveNow()
         previewTask?.cancel()
         runTask?.cancel()
+        // The job in progress may not have wound down in time to write the run's end itself.
+        if runTask != nil { db.closeUnfinishedRuns(note: "Stopped.") }
         runAgent?.close()  // a cloud session is stopped before the app exits
+        signInCloud?.stopBeforeExit()
         webAgent?.close()
         ollama.stop()
         Supervisor.terminateAll(timeout: 2)

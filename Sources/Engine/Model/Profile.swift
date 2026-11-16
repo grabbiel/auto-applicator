@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 public let declineToSelfIdentify = "Decline to self-identify"
@@ -380,4 +381,14 @@ extension KeyedDecodingContainer {
 
 extension String {
     public var trimmed: String { trimmingCharacters(in: .whitespacesAndNewlines) }
+}
+
+extension Profile {
+    /// Changes whenever anything in the profile does (so answers worked out from an older one can be forgotten).
+    public var fingerprint: String {
+        let enc = JSONEncoder()
+        enc.outputFormatting = .sortedKeys
+        let data = (try? enc.encode(self)) ?? Data()
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
 }

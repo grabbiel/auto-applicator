@@ -1,0 +1,18 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Privacy Notice and Sign-In</title></head>
+<body>
+<h1>Privacy Notice and Sign-In</h1>
+<p>In order to proceed with any application, please read and acknowledge our Candidate Privacy Notice.</p>
+<form onsubmit="return false">
+  <label for="email">Email</label><input type="email" id="email" name="css_loginName">
+  <label for="phoneNumber">Number</label><input type="text" id="phoneNumber" name="css_phoneNumber">
+  <input type="submit" id="enterEmailSubmitButton" value="I Acknowledge the Privacy Notice">
+</form>
+<script>
+  document.getElementById('enterEmailSubmitButton').onclick = () => {
+    if (!document.getElementById('email').value) return;
+    document.body.innerHTML = '<form onsubmit="return false"><label for="cv">Resume *</label><input type="file" id="cv" name="resume">' +
+      '<button type="submit" id="send">Submit Application</button></form>';
+  };
+</script>
+</body></html>

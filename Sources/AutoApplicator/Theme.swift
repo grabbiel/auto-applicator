@@ -103,7 +103,7 @@ extension JobStatus {
         case .practiceComplete: .blue
         case .needsAnswer: .amber
         case .failedForm, .failedOTPTimeout: .red
-        case .skippedBlacklist, .skippedTitleFilter, .skippedAlreadyApplied: .neutral
+        case .skippedBlacklist, .skippedTitleFilter, .skippedAlreadyApplied, .skippedCantAnswer: .neutral
         }
     }
 
@@ -115,6 +115,7 @@ extension JobStatus {
         case .failedForm, .failedOTPTimeout: "exclamationmark.triangle"
         case .skippedBlacklist, .skippedTitleFilter: "line.3.horizontal.decrease"
         case .skippedAlreadyApplied: "checkmark"
+        case .skippedCantAnswer: "nosign"
         }
     }
 }

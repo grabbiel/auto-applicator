@@ -133,7 +133,7 @@ struct KnowledgeView: View {
 
     private var answers: [CachedAnswer] {
         model.learned.filter { a in
-            (!onlyMine || a.learnedFromUser)
+            (!onlyMine || a.learnedFromUser || a.declined)
                 && (model.knowledgeQuery.isEmpty || a.question.localizedCaseInsensitiveContains(model.knowledgeQuery) || a.answer.localizedCaseInsensitiveContains(model.knowledgeQuery))
         }
     }
@@ -203,7 +203,7 @@ private struct AnswerRow: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(answer.question).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Palette.text).lineLimit(2)
                 Spacer()
-                Pill(text: sourceLabel, tone: answer.learnedFromUser ? .green : .neutral)
+                Pill(text: sourceLabel, tone: answer.learnedFromUser || answer.declined ? .green : .neutral)
             }
             if editing {
                 HStack(spacing: 8) {
@@ -217,10 +217,11 @@ private struct AnswerRow: View {
                 }
             } else {
                 HStack {
-                    Text(answer.answer.isEmpty ? "(left blank)" : answer.answer).font(Typo.body).foregroundStyle(Palette.textSoft).lineLimit(3)
+                    Text(answer.declined ? "You can't answer this, so jobs that require it are skipped." : answer.answer.isEmpty ? "(left blank)" : answer.answer)
+                        .font(Typo.body).foregroundStyle(Palette.textSoft).lineLimit(3)
                     Spacer()
-                    Button("Edit") { text = answer.answer; editing = true }.buttonStyle(QuietButtonStyle())
-                    Button("Forget") { model.forget(answer) }.buttonStyle(QuietButtonStyle(color: Palette.textSoft))
+                    Button(answer.declined ? "Answer it" : "Edit") { text = answer.answer; editing = true }.buttonStyle(QuietButtonStyle())
+                    Button(answer.declined ? "Undo" : "Forget") { model.forget(answer) }.buttonStyle(QuietButtonStyle(color: Palette.textSoft))
                 }
             }
         }
@@ -231,6 +232,7 @@ private struct AnswerRow: View {
         switch answer.source {
         case "user": "You"
         case "edited": "You (edited)"
+        case "declined": "You can't answer"
         case "llm:high": "AI, confident"
         default: answer.source.hasPrefix("llm") ? "AI" : "Profile"
         }

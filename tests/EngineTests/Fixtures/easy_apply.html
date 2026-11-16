@@ -12,9 +12,11 @@
   <div id="job-details">We build Python services on AWS. 5+ years of Python required.</div>
   <button class="jobs-apply-button" aria-label="Easy Apply to Backend Engineer at Initech" id="ea">Easy Apply</button>
 </main>
+<!-- ?shadow=1: like LinkedIn's newer job page, the window is drawn inside an open shadow root (#interop-outlet), with
+     no dialog role or class, and "1/3 pages" in place of a progress bar. -->
 <div id="modal-host"></div>
 <template id="modal-tpl">
-  <div class="jobs-easy-apply-modal" role="dialog" aria-labelledby="jobs-apply-header">
+  <div class="jobs-easy-apply-modal" role="dialog" aria-labelledby="jobs-apply-header" id="ea-modal">
     <h2 id="jobs-apply-header">Apply to Initech</h2>
     <button aria-label="Dismiss" id="dismiss">×</button>
     <div role="progressbar" aria-valuenow="0" id="bar"></div>
@@ -54,14 +56,45 @@
 <script>
   window.__submitted = false; window.__discarded = false; window.__followAtSubmit = null;
   const params = new URLSearchParams(location.search);
-  document.getElementById('ea').addEventListener('click', () => {
-    const host = document.getElementById('modal-host');
-    host.innerHTML = '';
+  // ?lang=es: LinkedIn in Spanish (a member's display language); the questions stay as they are.
+  const es = params.get('lang') === 'es';
+  const shadow = params.get('shadow') === '1';
+  const say = (el, text, label) => { if (!el) return; el.textContent = text; if (label !== undefined) el.setAttribute('aria-label', label); };
+  if (es) say(document.getElementById('ea'), 'Solicitud sencilla', 'Solicitud sencilla para Backend Engineer en Initech');
+  const openModal = () => {
+    const outlet = document.getElementById('modal-host');
+    const host = shadow ? (outlet.shadowRoot || outlet.attachShadow({mode: 'open'})) : outlet;
+    host.innerHTML = shadow ? '<style>' + document.querySelector('style').textContent + '</style>' : '';
     host.appendChild(document.getElementById('modal-tpl').content.cloneNode(true));
+    if (shadow) {
+      const m = host.querySelector('#ea-modal');
+      m.removeAttribute('role'); m.removeAttribute('class');
+      const bar = host.querySelector('#bar'); bar.removeAttribute('role'); bar.removeAttribute('aria-valuenow'); bar.textContent = '1/3 pages';
+    }
+    if (es) {
+      say(host.querySelector('#jobs-apply-header'), 'Solicitar en Initech');
+      say(host.querySelector('#dismiss'), '×', 'Descartar');
+      say(host.querySelector('[data-step="1"] h3'), 'Información de contacto');
+      say(host.querySelector('[data-step="1"] .next'), 'Siguiente', 'Ir al siguiente paso');
+      say(host.querySelector('[data-step="2"] h3'), 'Preguntas adicionales');
+      say(host.querySelector('[data-step="2"] .next'), 'Revisar', 'Revisar tu solicitud');
+      say(host.querySelector('[data-step="3"] h3'), 'Revisar tu solicitud');
+      say(host.querySelector('#submit'), 'Enviar solicitud', 'Enviar solicitud');
+    }
     if (params.get('extra') === 'rust') {
       host.querySelector('.extra').innerHTML = '<label for="rust">How many years of experience do you have with Rust?</label><input id="rust" required>';
     }
     wire(host);
+  };
+  // ?remind=1: LinkedIn's "Job search safety reminder" comes first, with "Continue applying".
+  document.getElementById('ea').addEventListener('click', () => {
+    if (params.get('remind') !== '1' || window.__reminded) return openModal();
+    window.__reminded = true;
+    const r = document.createElement('div');
+    r.setAttribute('role', 'dialog');
+    r.innerHTML = '<h2>Job search safety reminder</h2><p>Research the company before you apply.</p><button type="button">Continue applying</button>';
+    document.body.appendChild(r);
+    r.querySelector('button').addEventListener('click', () => { r.remove(); openModal(); });
   });
   function setError(input, msg) {
     const c = input.closest('[data-test-form-element]');
@@ -87,19 +120,22 @@
     host.querySelectorAll('.next').forEach(b => b.addEventListener('click', () => {
       if (!validate(steps[cur])) return;
       steps[cur].classList.remove('active'); cur++; steps[cur].classList.add('active');
-      host.querySelector('#bar').setAttribute('aria-valuenow', String(cur * 50));
+      const bar = host.querySelector('#bar');
+      if (shadow) bar.textContent = (cur + 1) + '/3 pages'; else bar.setAttribute('aria-valuenow', String(cur * 50));
     }));
     host.querySelector('#submit').addEventListener('click', () => {
       window.__submitted = true;
       window.__followAtSubmit = host.querySelector('#follow-company-checkbox').checked;
-      host.querySelector('.jobs-easy-apply-modal').innerHTML =
-        '<h2>Application sent</h2><p>Your application was sent to Initech!</p><button>Done</button>';
+      host.querySelector('#ea-modal').innerHTML = es
+        ? '<h2>Solicitud enviada</h2><p>Se envió tu solicitud a Initech.</p><button>Listo</button>'
+        : '<h2>Application sent</h2><p>Your application was sent to Initech!</p><button>Done</button>';
     });
     host.querySelector('#dismiss').addEventListener('click', () => {
       const d = document.createElement('div'); d.setAttribute('role', 'alertdialog');
-      d.innerHTML = '<p>Save this application?</p><button data-control-name="discard_application_confirm_btn">Discard</button>';
+      d.innerHTML = es ? '<p>¿Guardar esta solicitud?</p><button>Descartar</button>'
+                       : '<p>Save this application?</p><button data-control-name="discard_application_confirm_btn">Discard</button>';
       d.querySelector('button').addEventListener('click', () => { window.__discarded = true; host.innerHTML = ''; d.remove(); });
-      document.body.appendChild(d);
+      (shadow ? host : document.body).appendChild(d);
     });
   }
 </script>

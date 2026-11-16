@@ -8,7 +8,8 @@ public struct VerificationResult: Sendable, Equatable {
     public var source: String  // "pattern" or "ai"
 }
 
-public enum VerificationKind: Sendable { case code, link, any }
+/// `reset`: the link (or code) in a "reset your password" email.
+public enum VerificationKind: Sendable { case code, link, any, reset }
 
 /// Pulls verification codes and confirmation links out of emails.
 public enum VerificationExtractor {
@@ -64,11 +65,16 @@ public enum VerificationExtractor {
 
     static let linkGood = Regex(#"verif|confirm|activat|validat|magic|sign[-_ ]?in|login|token=|email_verification"#)
     static let linkBad = Regex(#"unsubscribe|privacy|terms|preferences|help|support|facebook|twitter|linkedin\.com/company|mailto:"#)
+    /// A link that resets a password.
+    static let resetGood = Regex(#"reset|password|passwd|recover|forgot|token="#)
 
-    public static func link(in links: [(String, String)], domainHint: String = "") -> String? {
+    public static func link(in links: [(String, String)], domainHint: String = "", reset: Bool = false) -> String? {
+        let linkGood = reset ? Self.resetGood : Self.linkGood
         var best: (Int, String)?
         for (text, href) in links {
             guard href.lowercased().hasPrefix("http"), !linkBad.matches(href) else { continue }
+            // The site's own address alone (its logo) isn't a confirmation link.
+            guard linkGood.matches(href) || linkGood.matches(text) else { continue }
             var score = 0
             if linkGood.matches(href) { score += 2 }
             if linkGood.matches(text) { score += 3 }
@@ -107,18 +113,33 @@ public final class EmailVerifier: @unchecked Sendable {
     let ai: AIService?
     let pollInterval: TimeInterval
     let openSession: @Sendable (Secrets) async throws -> MailSession
+    /// The spam folder, where job sites' first emails often land (Gmail only; nil elsewhere and in tests).
+    let openSpam: (@Sendable (Secrets) async throws -> MailSession?)?
 
+    /// `openSession` stays last so a trailing closure (tests' fake mailbox) is the inbox, not the spam folder.
     public init(secrets: Secrets, ai: AIService?, pollInterval: TimeInterval = 4,
+                openSpam: (@Sendable (Secrets) async throws -> MailSession?)? = nil,
                 openSession: (@Sendable (Secrets) async throws -> MailSession)? = nil) {
         self.secrets = secrets
         self.ai = ai
         self.pollInterval = pollInterval
-        self.openSession = openSession ?? { secrets in
+        @Sendable func imap(_ secrets: Secrets, _ mailbox: String) async throws -> IMAPClient {
             let client = IMAPClient(host: secrets.imapHost, port: secrets.imapPort)
             try await client.open()
             try await client.login(user: secrets.imapUser, password: secrets.imapPassword.replacingOccurrences(of: " ", with: ""))
-            try await client.select()
+            try await client.select(mailbox)
             return client
+        }
+        self.openSession = openSession ?? { try await imap($0, "INBOX") }
+        if let openSpam {
+            self.openSpam = openSpam
+        } else if openSession == nil {
+            self.openSpam = { secrets in
+                guard secrets.imapHost.lowercased().contains("gmail") else { return nil }
+                return try await imap(secrets, IMAPClient.quote("[Gmail]/Spam"))
+            }
+        } else {
+            self.openSpam = nil
         }
     }
 
@@ -145,28 +166,38 @@ public final class EmailVerifier: @unchecked Sendable {
             Log.warn("Couldn't open the inbox: \(error.localizedDescription)")
             return nil
         }
-        defer { session.close() }
-        var examined = Set<Int>()
+        var spam: MailSession?
+        do { spam = try await openSpam?(secrets) } catch { Log.info("Couldn't open the spam folder: \(error.localizedDescription)") }
+        defer {
+            session.close()
+            spam?.close()
+        }
+        var examined = Set<String>()
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline, !Task.isCancelled {
-            do {
-                try await session.refresh()
-                for uid in try await session.uids(since: since) where !examined.contains(uid) {
-                    examined.insert(uid)
-                    guard let raw = try await session.fetch(uid: uid) else { continue }
-                    let parsed = MIME.parse(raw)
-                    if let d = parsed.date, d < since.addingTimeInterval(-120) { continue }
-                    guard VerificationExtractor.matchesHint(parsed, senderHint) else { continue }
-                    let domain = String(senderHint.split(separator: "|").first ?? "")
-                    if let result = await extract(parsed, kind: kind, codeLength: codeLength, domainHint: domain) {
-                        try? await session.markSeen(uid: uid)
-                        Log.info("Verification email found: \"\(parsed.subject)\" from \(parsed.sender)")
-                        return result
+            for (name, box) in [("inbox", Optional(session)), ("spam", spam)] {
+                guard let box else { continue }
+                do {
+                    try await box.refresh()
+                    for uid in try await box.uids(since: since) where !examined.contains("\(name)/\(uid)") {
+                        examined.insert("\(name)/\(uid)")
+                        guard let raw = try await box.fetch(uid: uid) else { continue }
+                        let parsed = MIME.parse(raw)
+                        if let d = parsed.date, d < since.addingTimeInterval(-120) { continue }
+                        guard VerificationExtractor.matchesHint(parsed, senderHint) else { continue }
+                        let domain = String(senderHint.split(separator: "|").first ?? "")
+                        if let result = await extract(parsed, kind: kind, codeLength: codeLength, domainHint: domain) {
+                            try? await box.markSeen(uid: uid)
+                            Log.info("Verification email found\(name == "spam" ? " in spam" : ""): \"\(parsed.subject)\" from \(parsed.sender)")
+                            return result
+                        }
                     }
+                } catch where name == "spam" {
+                    spam = nil  // keep watching the inbox
+                } catch {
+                    Log.warn("Inbox check failed: \(error.localizedDescription)")
+                    return nil
                 }
-            } catch {
-                Log.warn("Inbox check failed: \(error.localizedDescription)")
-                return nil
             }
             try? await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
         }
@@ -178,11 +209,12 @@ public final class EmailVerifier: @unchecked Sendable {
             switch kind {
             case .code: code != nil
             case .link: url != nil
-            case .any: code != nil || url != nil
+            case .any, .reset: code != nil || url != nil
             }
         }
-        let code = kind == .link ? nil : VerificationExtractor.code(in: "\(e.subject)\n\(e.text)", length: codeLength)
-        let url = kind == .code ? nil : VerificationExtractor.link(in: e.links, domainHint: domainHint)
+        // A reset email's link comes first: its other links (and numbers) are rarely what's wanted.
+        let url = kind == .code ? nil : VerificationExtractor.link(in: e.links, domainHint: domainHint, reset: kind == .reset)
+        let code = kind == .link || (kind == .reset && url != nil) ? nil : VerificationExtractor.code(in: "\(e.subject)\n\(e.text)", length: codeLength)
         if satisfied(code, url) { return VerificationResult(code: code, url: url, subject: e.subject, sender: e.sender, source: "pattern") }
         guard let ai else { return nil }
         guard let found = try? await ai.extractVerification(e) else { return nil }

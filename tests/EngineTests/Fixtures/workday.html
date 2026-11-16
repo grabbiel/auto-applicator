@@ -1,0 +1,262 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Create Account</title>
+<style>.filter-box { position: relative; width: 300px; height: 40px; } [data-automation-id="click_filter"] { position: absolute; inset: 0; z-index: 2; }
+  [data-automation-id="createAccountSubmitButton"] { width: 300px; height: 40px; } .bee { position: absolute; left: -9999px; }</style></head>
+<body>
+<!-- Modelled on Workday (Fannie Mae, 2026): the sign-up form's "Create Account" button is hidden from people
+     (aria-hidden, tabindex -2) and a "click_filter" placed just before it takes the click; a honeypot field. Then
+     the application's pages, whose footer button ends with "Submit".
+     ?unverified=TOKEN: the sign-in page for an account whose email isn't confirmed (Frost, 2026): signing in shows
+     "Verify your account…" and "Resend Account Verification" until ?activate=TOKEN (the emailed link) has been opened.
+     ?existing=TOKEN: an account for the email made by hand, with another password (Salesforce, 2026): signing in says
+     "Wrong email address or password", Create Account just comes back to Sign In (Workday answers the same either
+     way), and "Forgot your password?" asks for the email; ?reset=TOKEN (the emailed link) sets a new password. -->
+<div id="app"></div>
+<script>
+const app = document.getElementById('app');
+window.__created = false; window.__buttonOnly = false; window.__bee = '';
+const page = (title, body, next) => {
+  app.innerHTML = `<h2 data-automation-id="jobTitleHeading">Software Engineer</h2><h3>${title}</h3>${body}` +
+    `<button data-automation-id="pageFooterNextButton">${next}</button>`;
+};
+const info = () => {
+  page('My Information', `<div data-automation-id="formField-legalName--firstName"><label for="fn">First Name *</label><input id="fn" required></div>`,
+       'Save and Continue');
+  document.querySelector('[data-automation-id="pageFooterNextButton"]').onclick = () => {
+    if (!document.getElementById('fn').value) return;
+    page('Review', '<p>Check your application.</p>', 'Submit');
+    document.querySelector('[data-automation-id="pageFooterNextButton"]').onclick = () => { app.innerHTML = '<h2>Application Submitted</h2>'; };
+  };
+};
+const createForm = () => {
+app.innerHTML = `
+  <div data-automation-id="signInContent"><h2>Create Account</h2>
+    <div data-automation-id="formField-email"><label for="em">Email Address *</label><input id="em" data-automation-id="email" type="text"></div>
+    <div data-automation-id="formField-password"><label for="pw">Password *</label><input id="pw" data-automation-id="password" type="password"></div>
+    <div data-automation-id="formField-verifyPassword"><label for="vp">Verify New Password *</label><input id="vp" data-automation-id="verifyPassword" type="password"></div>
+    <input class="bee" data-automation-id="beecatcher" name="website" type="text">
+    <div data-automation-id="noCaptchaWrapper" style="position: relative"><div><div class="filter-box">
+      <div aria-label="Create Account" role="button" tabindex="0" data-automation-id="click_filter"></div>
+      <button type="submit" data-automation-id="createAccountSubmitButton" tabindex="-2" aria-hidden="true">Create Account</button>
+    </div></div></div>
+    <button data-automation-id="signInLink">Sign In</button>
+  </div>`;
+document.querySelector('[data-automation-id="createAccountSubmitButton"]').onclick = () => { window.__buttonOnly = true; };
+document.querySelector('[data-automation-id="click_filter"]').onclick = () => {
+  const v = id => document.getElementById(id).value;
+  window.__bee = document.querySelector('[data-automation-id="beecatcher"]').value;
+  if (!v('em') || !v('pw') || v('pw') !== v('vp')) return;
+  window.__created = true;
+  info();
+};
+};
+createForm();
+const q = new URLSearchParams(location.search);
+if (q.get('ssofirst')) {
+  // Newer sign-in pages (BlackRock, 2026): Apple, Google, or "Sign in with email", which shows the email form; its
+  // honeypot is clipped to a pixel instead of placed off the page.
+  app.innerHTML = `<div data-automation-id="signInContent"><h2>Sign In</h2>
+    <p>By signing in, you agree to the processing of your information in accordance with our Privacy Notice.</p>
+    <button data-automation-id="AppleSignInButton">Sign in with Apple</button>
+    <button data-automation-id="GoogleSignInButton">Sign in with Google</button><p>OR</p>
+    <button data-automation-id="SignInWithEmailButton">Sign in with email</button></div>`;
+  document.querySelector('[data-automation-id="AppleSignInButton"]').onclick = () => { window.__sso = 'apple'; };
+  document.querySelector('[data-automation-id="GoogleSignInButton"]').onclick = () => { window.__sso = 'google'; };
+  document.querySelector('[data-automation-id="SignInWithEmailButton"]').onclick = () => {
+    app.innerHTML = `<div data-automation-id="signInContent"><h2>Sign In</h2>
+      <div data-automation-id="formField-email"><label for="em">Email Address *</label><input id="em" data-automation-id="email" type="text"></div>
+      <div data-automation-id="formField-password"><label for="pw">Password *</label><input id="pw" data-automation-id="password" type="password"></div>
+      <div style="position: relative"><label for="hp">Enter website. This input is for robots only, do not enter if you're human.</label>
+        <input id="hp" data-automation-id="beecatcher" name="website" type="text"
+               style="position: absolute; width: 1px; height: 1px; clip: rect(1px, 1px, 1px, 1px); overflow: hidden"></div>
+      <div class="filter-box"><div aria-label="Sign In" role="button" tabindex="0" data-automation-id="click_filter"></div>
+        <button type="submit" data-automation-id="signInSubmitButton" tabindex="-2" aria-hidden="true">Sign In</button></div>
+      <p>Don't have an account yet?<button data-automation-id="createAccountLink">Create Account</button></p>
+      <button data-automation-id="forgotPasswordLink">Forgot your password?</button></div>`;
+    document.querySelector('[data-automation-id="click_filter"]').onclick = () => {
+      window.__signIns = (window.__signIns || 0) + 1;
+      if (!document.querySelector('[data-automation-id="errorMessage"]'))
+        document.querySelector('[data-automation-id="signInContent"]').insertAdjacentHTML('afterbegin',
+          '<div data-automation-id="errorMessage">Wrong email address or password.</div>');
+    };
+    document.querySelector('[data-automation-id="createAccountLink"]').onclick = createForm;
+  };
+} else if (q.get('info')) {
+  // "My Information" as Workday filled it from the resume (Dexcom, Caterpillar, 2026): Country "Peru", Country Phone
+  // Code "Peru (+51)", Phone Number "+1 5125550142"; the number is accepted only with its own country's code.
+  const COUNTRIES = ['Canada', 'Mexico', 'Peru', 'United Kingdom', 'United States of America', 'United States Minor Outlying Islands'];
+  const CODES = ['Peru (+51)', 'United States of America (+1)', 'United States Minor Outlying Islands (+1)'];
+  page('My Information', `<div id="errors"></div>` +
+    `<div data-automation-id="formField-country"><label>Country *</label><button aria-haspopup="listbox" data-automation-id="countryDropdown" aria-controls="clist">Peru</button>` +
+    `<ul id="clist" role="listbox" style="display: none"></ul></div>` +
+    `<div data-automation-id="formField-phoneType"><label>Phone Device Type *</label><button aria-haspopup="listbox">Mobile</button></div>` +
+    `<div data-automation-id="formField-countryPhoneCode"><label>Country Phone Code *</label><div data-automation-id="countryPhoneCode">` +
+    `<div data-automation-id="multiselectInputContainer"><div data-automation-id="selectedItem">Peru (+51)</div><input data-automation-id="searchBox"></div></div></div>` +
+    `<div id="prompt"></div>` +
+    `<div data-automation-id="formField-phoneNumber"><label for="ph">Phone Number *</label><input id="ph" data-automation-id="phone-number" value="+1 5125550142"></div>`,
+    'Save and Continue');
+  const $ = s => document.querySelector(s);
+  $('[data-automation-id="countryDropdown"]').onclick = () => {
+    $('#clist').style.display = '';
+    $('#clist').innerHTML = COUNTRIES.map(c => `<li role="option">${c}</li>`).join('');
+    $('#clist').querySelectorAll('li').forEach(li => li.onclick = () => { $('[data-automation-id="countryDropdown"]').innerText = li.innerText; $('#clist').style.display = 'none'; });
+  };
+  $('[data-automation-id="searchBox"]').onkeydown = e => {
+    if (e.key === 'Escape') { $('#prompt').innerHTML = ''; return; }
+    if (e.key !== 'Enter') return;
+    const t = e.target.value.toLowerCase();
+    $('#prompt').innerHTML = CODES.filter(c => c.toLowerCase().includes(t.split(' ')[0])).map(c => `<div data-automation-id="promptOption">${c}</div>`).join('');
+    document.querySelectorAll('[data-automation-id="promptOption"]').forEach(o => o.onclick = () => {
+      $('[data-automation-id="multiselectInputContainer"]').innerHTML = `<div data-automation-id="selectedItem">${o.innerText}</div><input data-automation-id="searchBox">`;
+      $('#prompt').innerHTML = '';
+    });
+  };
+  $('[data-automation-id="pageFooterNextButton"]').onclick = () => {
+    const code = $('[data-automation-id="selectedItem"]').innerText, ph = $('#ph').value;
+    window.__info = { country: $('[data-automation-id="countryDropdown"]').innerText, code, phone: ph };
+    const plus = (code.match(/\(\+(\d+)\)/) || [])[1];
+    if (plus !== '1' || !/^\d{10}$/.test(ph)) {
+      $('#errors').innerHTML = '<h4>Errors Found</h4><p>1. Error - Phone Number</p><p>Enter a valid format for Phone Number.</p>';
+      return;
+    }
+    page('Review', '<p>Check your application.</p>', 'Submit');
+  };
+} else if (q.get('experience')) {
+  // "My Experience" as Workday leaves it after reading the resume (McKesson, Blue Origin, 2026): a current job with no
+  // To date and "I currently work here" unticked, a job with no From date, one the profile doesn't have, an empty
+  // school search ("type ... and press Enter"), and a required resume. Errors show only as text.
+  const SCHOOLS = ['University of Texas at Dallas', 'The University of Texas at Austin', 'Texas A&M University', 'Other'];
+  const date = (key, label, m, y) => `<div data-automation-id="formField-${key}"><label>${label} *</label><div data-automation-id="dateInputWrapper">` +
+    `<input data-automation-id="dateSectionMonth-input" role="spinbutton" placeholder="MM" value="${m}">` +
+    `<input data-automation-id="dateSectionYear-input" role="spinbutton" placeholder="YYYY" value="${y}"></div></div>`;
+  const text = (key, label, v) => `<div data-automation-id="formField-${key}"><label for="${key}">${label} *</label><input id="${key}" value="${v}"></div>`;
+  const job = (n, title, company, from, to) => `<div role="group" aria-labelledby="we${n}"><h4 id="we${n}">Work Experience ${n}</h4>` +
+    text(`jobTitle${n}`, 'Job Title', title) + text(`company${n}`, 'Company', company) +
+    `<div data-automation-id="formField-currentlyWorkHere"><label for="cw${n}">I currently work here</label>` +
+    `<input type="checkbox" id="cw${n}" data-automation-id="currentlyWorkHere"></div>` +
+    date(`startDate${n}`, 'From', from[0], from[1]) + date(`endDate${n}`, 'To', to[0], to[1]) + `</div>`;
+  page('My Experience', `<div id="errors"></div><h3>Work Experience</h3>` +
+    job(1, 'Senior Software Engineer', 'Acme Corp', ['03', '2022'], ['', '']) +
+    job(2, 'Software Engineer', 'Globex', ['', ''], ['02', '2022']) +
+    job(3, 'Intern', 'Hooli', ['01', '2018'], ['05', '2018']) +
+    `<h3>Education</h3><p>Please type all or part of your School name and press Enter to select. If your School does not appear in the drop-down, type Other and press Enter to move forward.</p>` +
+    `<div role="group" aria-labelledby="ed1"><h4 id="ed1">Education 1</h4>` +
+    `<div data-automation-id="formField-school"><label>School or University *</label><div data-automation-id="multiselectInputContainer">` +
+    `<input data-automation-id="searchBox" placeholder="Search"></div></div>` +
+    `<div data-automation-id="formField-degree"><label>Degree *</label><button aria-haspopup="listbox">Bachelors (ex. Bachelors of Arts or Science)</button></div></div>` +
+    `<div id="prompt"></div>` +
+    `<h3>Resume/CV</h3><div data-automation-id="formField-resume"><label>Upload a file (5MB max) *</label><div id="files"></div>` +
+    `<input type="file" data-automation-id="file-upload-input-ref" style="display: none"><button id="pick">Select files</button></div>`,
+    'Save and Continue');
+  const $ = s => document.querySelector(s);
+  [1, 2, 3].forEach(n => { $(`#cw${n}`).onchange = e => { $(`[data-automation-id="formField-endDate${n}"]`).style.display = e.target.checked ? 'none' : ''; }; });
+  $('[data-automation-id="file-upload-input-ref"]').onchange = e => {
+    if (e.target.files.length) $('#files').innerHTML = `<span>${e.target.files[0].name}</span><button data-automation-id="delete-file">Delete</button>`;
+  };
+  $('[data-automation-id="searchBox"]').onkeydown = e => {
+    if (e.key === 'Escape') { $('#prompt').innerHTML = ''; return; }
+    if (e.key !== 'Enter') return;
+    const words = e.target.value.toLowerCase().split(/\W+/).filter(w => w.length > 4);
+    const found = e.target.value.trim().toLowerCase() === 'other' ? ['Other'] : SCHOOLS.filter(s => words.some(w => s.toLowerCase().includes(w)));
+    window.__schoolSearches = (window.__schoolSearches || []).concat([e.target.value]);
+    $('#prompt').innerHTML = found.length ? found.map(s => `<div data-automation-id="promptOption">${s}</div>`).join('') : '<p>No Items.</p>';
+    document.querySelectorAll('[data-automation-id="promptOption"]').forEach(o => o.onclick = () => {
+      $('[data-automation-id="multiselectInputContainer"]').innerHTML = `<div data-automation-id="selectedItem">${o.innerText}</div>`;
+      $('#prompt').innerHTML = '';
+    });
+  };
+  $('[data-automation-id="pageFooterNextButton"]').onclick = () => {
+    const missing = [];
+    [1, 2, 3].forEach(n => {
+      const y = k => $(`[data-automation-id="formField-${k}${n}"] [data-automation-id="dateSectionYear-input"]`).value;
+      if (!y('startDate')) missing.push('From');
+      if (!$(`#cw${n}`).checked && !y('endDate')) missing.push('To');
+    });
+    if (!$('[data-automation-id="selectedItem"]')) missing.push('School or University');
+    if (!$('[data-automation-id="delete-file"]')) missing.push('Upload a file (5MB max)');
+    window.__presses = (window.__presses || 0) + 1;
+    if (missing.length) {
+      $('#errors').innerHTML = '<h4>Errors Found</h4>' + missing.map((m, k) =>
+        `<p>${k + 1}. Error - ${m}</p><p>The field ${m} is required and must have a value.</p>`).join('');
+      return;
+    }
+    window.__experience = {
+      current: $('#cw1').checked, from2: $('[data-automation-id="formField-startDate2"] [data-automation-id="dateSectionMonth-input"]').value + '/' +
+        $('[data-automation-id="formField-startDate2"] [data-automation-id="dateSectionYear-input"]').value,
+      hooli: $('#cw3').checked, school: $('[data-automation-id="selectedItem"]').innerText, file: $('#files span').innerText };
+    page('Review', '<p>Check your application.</p>', 'Submit');
+  };
+} else if (q.get('activate')) {
+  localStorage.setItem('aaActivated', q.get('activate'));
+  app.innerHTML = '<h2>Your account has been verified.</h2><button data-automation-id="signInLink">Sign In</button>';
+} else if (q.get('unverified')) {
+  const signIn = (warn) => {
+    app.innerHTML = `<div data-automation-id="signInContent"><h2>Sign In</h2>` +
+      (warn ? `<div data-automation-id="errorMessage">Verify your account before you sign in or request a verification email.</div>` +
+              `<button id="resend">Resend Account Verification</button>` : '') +
+      `<div data-automation-id="formField-email"><label for="em">Email Address *</label><input id="em" data-automation-id="email" type="text"></div>
+       <div data-automation-id="formField-password"><label for="pw">Password *</label><input id="pw" data-automation-id="password" type="password"></div>
+       <div class="filter-box"><div aria-label="Sign In" role="button" tabindex="0" data-automation-id="click_filter"></div>
+         <button type="submit" data-automation-id="signInSubmitButton" tabindex="-2" aria-hidden="true">Sign In</button></div>
+       <button data-automation-id="createAccountLink">Create Account</button></div>`;
+    if (warn) document.getElementById('resend').onclick = () => { window.__resent = true; };
+    document.querySelector('[data-automation-id="click_filter"]').onclick = () => {
+      if (!document.getElementById('em').value || !document.getElementById('pw').value) return;
+      if (localStorage.getItem('aaActivated') === q.get('unverified')) info(); else signIn(true);
+    };
+  };
+  signIn(false);
+} else if (q.get('existing') || q.get('reset')) {
+  const field = (id, aid, label, type) => `<div data-automation-id="formField-${aid}"><label for="${id}">${label} *</label>` +
+    `<input id="${id}" data-automation-id="${aid}" type="${type}"></div>`;
+  const filter = (label, aid) => `<div class="filter-box"><div aria-label="${label}" role="button" tabindex="0" data-automation-id="click_filter"></div>` +
+    `<button type="submit" data-automation-id="${aid}" tabindex="-2" aria-hidden="true">${label}</button></div>`;
+  const $ = aid => document.querySelector(`[data-automation-id="${aid}"]`);
+  const val = id => document.getElementById(id).value;
+  const t = q.get('existing') || q.get('reset');
+  const signIn = (wrong) => {
+    app.innerHTML = `<div data-automation-id="signInContent"><h2>Sign In</h2>` +
+      (wrong ? `<div data-automation-id="errorMessage">Wrong email address or password.</div>` : '') +
+      field('em', 'email', 'Email Address', 'text') + field('pw', 'password', 'Password', 'password') + filter('Sign In', 'signInSubmitButton') +
+      `<button data-automation-id="createAccountLink">Create Account</button>` +
+      `<button data-automation-id="forgotPasswordLink">Forgot your password?</button></div>`;
+    $('click_filter').onclick = () => {
+      if (!val('em') || !val('pw')) return;
+      window.__signIns = (window.__signIns || 0) + 1;
+      if (localStorage.getItem('aaPw-' + t) === val('pw')) info(); else signIn(true);
+    };
+    $('createAccountLink').onclick = create;
+    $('forgotPasswordLink').onclick = forgot;
+  };
+  const create = () => {
+    app.innerHTML = `<div data-automation-id="signInContent"><h2>Create Account</h2>` + field('em', 'email', 'Email Address', 'text') +
+      field('pw', 'password', 'Password', 'password') + field('vp', 'verifyPassword', 'Verify New Password', 'password') +
+      filter('Create Account', 'createAccountSubmitButton') + `<button data-automation-id="signInLink">Sign In</button></div>`;
+    $('click_filter').onclick = () => { if (val('em') && val('pw') === val('vp')) { window.__createTried = true; signIn(false); } };
+    $('signInLink').onclick = () => signIn(false);
+  };
+  const forgot = () => {
+    app.innerHTML = `<div data-automation-id="signInContent"><h2>Forgot Password</h2>` + field('em', 'email', 'Email Address', 'text') +
+      filter('Reset Password', 'resetPasswordButton') + `<button data-automation-id="signInLink">Sign In</button></div>`;
+    $('click_filter').onclick = () => {
+      if (!val('em')) return;
+      window.__resetAsked = val('em');
+      app.innerHTML = '<p>If an account exists for this email, you will receive a link to reset your password.</p>' +
+        '<button data-automation-id="signInLink">Sign In</button>';
+      $('signInLink').onclick = () => signIn(false);
+    };
+  };
+  if (q.get('reset')) {
+    app.innerHTML = `<div data-automation-id="signInContent"><h2>Reset Password</h2>` + field('pw', 'password', 'New Password', 'password') +
+      field('vp', 'verifyPassword', 'Verify New Password', 'password') + filter('Reset Password', 'resetPasswordButton') + `</div>`;
+    $('click_filter').onclick = () => {
+      if (!val('pw') || val('pw') !== val('vp')) return;
+      localStorage.setItem('aaPw-' + t, val('pw'));
+      app.innerHTML = '<h2>Your password has been reset.</h2><button data-automation-id="signInLink">Sign In</button>';
+    };
+  } else {
+    signIn(false);
+  }
+}
+</script>
+</body></html>

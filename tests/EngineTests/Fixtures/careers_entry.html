@@ -1,0 +1,62 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Java Developer - Careers</title>
+<style>
+  #onetrust-banner-sdk { position: fixed; bottom: 0; left: 0; right: 0; padding: 20px; background: #fff; border-top: 1px solid #ccc; z-index: 10; }
+  .chat { position: fixed; right: 10px; bottom: 120px; }
+  section { margin: 12px 0; }
+  .field { margin: 8px 0; }
+</style></head>
+<body>
+<!-- Modelled on Infosys's careers site: a job page whose "Apply" (for first-time applicants) shows a privacy notice,
+     whose "Proceed" shows the form; plus a cookie banner over the page, a chat box and a "Save job" box. -->
+<header><input type="search" placeholder="Search jobs"><input type="text" placeholder="Location"><button>Search</button></header>
+<main>
+  <h1>Java Developer</h1>
+  <p>Build Java services. Spring Boot, AWS.</p>
+  <label><input type="checkbox" id="save-job-1"> Save job</label>
+  <section id="choose">
+    <p>I have an account</p><a class="apply-login-button" href="https://example.com/login">Login</a>
+    <p>I'm applying for the first time</p><a class="apply-first-time-button" href="#">Apply</a>
+  </section>
+  <section id="notice" style="display:none">
+    <h3>PRIVACY NOTICE</h3>
+    <p>We process your personal data to consider your application.</p>
+    <a class="consent-button" href="#">Proceed</a>
+  </section>
+  <form id="app" style="display:none" onsubmit="return false">
+    <div class="field"><label for="firstname">First name</label><input id="firstname" name="firstname" required></div>
+    <div class="field"><label for="lastname">Last name</label><input id="lastname" name="lastname" required></div>
+    <div class="field"><label for="email">Email address</label><input id="email" name="email" required></div>
+    <div class="field"><label for="phone">Phone number</label><input id="phone" name="phone"></div>
+    <div class="field"><label for="city">City</label><input id="city" name="city"></div>
+    <a class="form-next-button" id="forward-navigation" href="#">Next</a>
+  </form>
+  <form id="page2" style="display:none" onsubmit="return false">
+    <div class="field"><label for="resume">Resume *</label><input type="file" id="resume" name="resume"></div>
+    <button type="submit" id="send">Submit</button>
+  </form>
+</main>
+<div class="chat"><input id="PhenomChatbotFooterInput" placeholder="Ask anything"></div>
+<div id="onetrust-banner-sdk">
+  By clicking “Accept All Cookies”, you agree to the storing of cookies on your device.
+  <button id="onetrust-pc-btn-handler">Cookies Settings</button>
+  <button id="onetrust-reject-all-handler">Reject All</button>
+  <button id="onetrust-accept-btn-handler">Accept All Cookies</button>
+</div>
+<footer><a href="https://example.com/privacy">Privacy Statement</a></footer>
+<script>
+  window.__consent = '';
+  const hide = id => document.getElementById(id).style.display = 'none';
+  const show = id => document.getElementById(id).style.display = 'block';
+  document.getElementById('onetrust-reject-all-handler').onclick = () => { window.__consent = 'rejected'; hide('onetrust-banner-sdk'); };
+  document.getElementById('onetrust-accept-btn-handler').onclick = () => { window.__consent = 'accepted'; hide('onetrust-banner-sdk'); };
+  document.querySelector('.apply-first-time-button').onclick = e => { e.preventDefault(); hide('choose'); setTimeout(() => show('notice'), 300); };
+  document.querySelector('.consent-button').onclick = e => { e.preventDefault(); hide('notice'); setTimeout(() => show('app'), 300); };
+  document.getElementById('forward-navigation').onclick = e => {
+    e.preventDefault();
+    if (!document.getElementById('firstname').value || !document.getElementById('email').value) return;
+    hide('app'); show('page2');
+  };
+  document.getElementById('send').onclick = () => { window.__sent = true; document.querySelector('main').innerHTML = '<h1>Thank you for applying!</h1>'; };
+</script>
+</body></html>

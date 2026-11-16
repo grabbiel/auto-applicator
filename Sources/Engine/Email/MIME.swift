@@ -35,8 +35,11 @@ public enum MIME {
             htmlText = htmlToText(joined)
         }
         let text = plain.isEmpty ? htmlText : plain.joined(separator: "\n")
-        if !plain.isEmpty {
-            links += Regex(#"https?://[^\s<>"')\]]+"#, []).allMatches(text).map { ("", $0) }
+        // Addresses written out in the text are links too (Workday's activation link is only text, beside a logo link);
+        // such a link reads as itself.
+        let anchors = Set(links.map(\.1))
+        for url in Regex(#"https?://[^\s<>"')\]]+"#, []).allMatches(text) where !anchors.contains(url) && !links.contains(where: { $0.1 == url }) {
+            links.append((url, url))
         }
         let from = decodeWords(part.header("from"))
         let sender = Regex(#"<([^>]+)>"#, []).firstGroups(from)?[1] ?? from.trimmed

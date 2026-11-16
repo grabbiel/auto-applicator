@@ -22,7 +22,18 @@ public enum Scheduler {
         return c.url!
     }
 
-    static func plist(_ schedule: Schedule, logs: URL) -> [String: Any] {
+    /// The app the schedule opens, when it names one; nil for agents from before it did.
+    public static var scheduledApp: URL? {
+        guard let data = try? Data(contentsOf: agentURL),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let args = plist["ProgramArguments"] as? [String], let i = args.firstIndex(of: "-a"), i + 1 < args.count
+        else { return nil }
+        return URL(fileURLWithPath: args[i + 1], isDirectory: true)
+    }
+
+    /// `app` is the copy of the app to open (otherwise macOS picks whichever copy it knows for the link, which may be an
+    /// old one in a downloads or build folder).
+    static func plist(_ schedule: Schedule, logs: URL, app: URL? = nil) -> [String: Any] {
         let days: [Int?] = schedule.weekdaysOnly ? Array(1...5) : [nil]
         let calendar: [[String: Int]] = days.map { day in
             var d = ["Hour": schedule.hour, "Minute": schedule.minute]
@@ -31,7 +42,7 @@ public enum Scheduler {
         }
         return [
             "Label": label,
-            "ProgramArguments": ["/usr/bin/open", "-g", runURL(token: schedule.token).absoluteString],
+            "ProgramArguments": ["/usr/bin/open", "-g"] + (app.map { ["-a", $0.path] } ?? []) + [runURL(token: schedule.token).absoluteString],
             "StartCalendarInterval": calendar,
             "RunAtLoad": false,
             "ProcessType": "Interactive",
@@ -40,8 +51,8 @@ public enum Scheduler {
         ]
     }
 
-    public static func install(_ schedule: Schedule, paths: AppPaths) throws {
-        let data = try PropertyListSerialization.data(fromPropertyList: plist(schedule, logs: paths.logsDir), format: .xml, options: 0)
+    public static func install(_ schedule: Schedule, paths: AppPaths, app: URL? = nil) throws {
+        let data = try PropertyListSerialization.data(fromPropertyList: plist(schedule, logs: paths.logsDir, app: app), format: .xml, options: 0)
         try FileManager.default.createDirectory(at: agentURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         _ = launchctl(["bootout", "gui/\(getuid())/\(label)"])
         try data.write(to: agentURL, options: .atomic)

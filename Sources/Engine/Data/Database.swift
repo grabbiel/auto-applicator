@@ -8,11 +8,13 @@ public enum JobStatus: String, Codable, CaseIterable, Sendable {
     case skippedTitleFilter = "SKIPPED_TITLE_FILTER"
     case skippedAlreadyApplied = "SKIPPED_ALREADY_APPLIED"
     case needsAnswer = "SKIPPED_NEEDS_ANSWER"
+    /// It requires an answer the person said they can't give (an ID from another country).
+    case skippedCantAnswer = "SKIPPED_CANT_ANSWER"
     case failedOTPTimeout = "FAILED_OTP_TIMEOUT"
     case failedForm = "FAILED_FORM_ERROR"
 
     /// Never retried: the outcome is final.
-    public var isFinal: Bool { [.applied, .skippedBlacklist, .skippedTitleFilter, .skippedAlreadyApplied].contains(self) }
+    public var isFinal: Bool { [.applied, .skippedBlacklist, .skippedTitleFilter, .skippedAlreadyApplied, .skippedCantAnswer].contains(self) }
     public var isFailure: Bool { self == .failedForm || self == .failedOTPTimeout }
 
     public var label: String {
@@ -23,6 +25,7 @@ public enum JobStatus: String, Codable, CaseIterable, Sendable {
         case .skippedTitleFilter: "Skipped: title filter"
         case .skippedAlreadyApplied: "Already applied"
         case .needsAnswer: "Waiting for your answer"
+        case .skippedCantAnswer: "Skipped: asks something you can't answer"
         case .failedOTPTimeout: "Didn't finish: no email code"
         case .failedForm: "Didn't finish"
         }
@@ -35,6 +38,7 @@ public enum JobStatus: String, Codable, CaseIterable, Sendable {
         case .skippedBlacklist, .skippedTitleFilter: "Filtered"
         case .skippedAlreadyApplied: "Applied before"
         case .needsAnswer: "Needs you"
+        case .skippedCantAnswer: "Skipped"
         case .failedOTPTimeout, .failedForm: "Didn't finish"
         }
     }
@@ -88,6 +92,8 @@ public struct CachedAnswer: Identifiable, Equatable, Sendable {
     public var updatedAt: Date?
 
     public var learnedFromUser: Bool { source == "user" || source == "edited" }
+    /// The person said they can't answer it: forms that require it are skipped.
+    public var declined: Bool { source == "declined" }
 }
 
 public struct PendingQuestion: Identifiable, Equatable, Sendable {
@@ -150,8 +156,11 @@ public final class Database: @unchecked Sendable {
         CREATE TABLE IF NOT EXISTS runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT, started_at DATETIME, finished_at DATETIME, practice INTEGER, sent INTEGER DEFAULT 0,
             prepared INTEGER DEFAULT 0, needs_answer INTEGER DEFAULT 0, failed INTEGER DEFAULT 0, note TEXT DEFAULT '');
+        CREATE TABLE IF NOT EXISTS accounts (host TEXT PRIMARY KEY, email TEXT, created_at DATETIME);
+        CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
         """)
         if !columnExists("jobs", "evidence") { try exec("ALTER TABLE jobs ADD COLUMN evidence TEXT") }
+        if !columnExists("accounts", "how") { try exec("ALTER TABLE accounts ADD COLUMN how TEXT") }
     }
 
     public convenience init(paths: AppPaths) throws {
@@ -316,6 +325,16 @@ public final class Database: @unchecked Sendable {
         return nil
     }
 
+    /// Jobs that waited for the user's answers and have none left to wait for: the next run finishes them first,
+    /// whether or not the search shows them again.
+    public func answeredJobs(limit: Int = 50) -> [JobRecord] {
+        query("SELECT \(jobColumns) FROM jobs WHERE status = ? ORDER BY updated_at LIMIT ?", [.text(JobStatus.needsAnswer.rawValue), .int(Int64(limit))], jobRecord)
+            .filter { !jobHasPending($0.id) }
+    }
+
+    /// Lets every failed job be tried again (after a fix, or when the person asks).
+    public func resetAttempts(_ id: String) { run("UPDATE jobs SET attempts = 0 WHERE job_id = ?", [.text(id)]) }
+
     public func recentJobs(limit: Int = 200) -> [JobRecord] {
         query("SELECT \(jobColumns) FROM jobs ORDER BY updated_at DESC LIMIT ?", [.int(Int64(limit))], jobRecord)
     }
@@ -359,6 +378,27 @@ public final class Database: @unchecked Sendable {
     }
 
     public func cacheDelete(_ hash: String) { run("DELETE FROM qa_cache WHERE question_hash = ?", [.text(hash)]) }
+
+    /// Forgets the answers worked out from the profile (by the AI or the profile rules), keeping the person's own.
+    /// Returns how many. For when the profile changed: an address since corrected must not come back from the cache.
+    @discardableResult
+    public func forgetDerivedAnswers() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        let n = query("SELECT COUNT(*) FROM qa_cache WHERE source NOT IN ('user', 'edited', 'declined')") { $0.int(0) }.first ?? 0
+        run("DELETE FROM qa_cache WHERE source NOT IN ('user', 'edited', 'declined')")
+        return n
+    }
+
+    // MARK: - small settings the app keeps for itself
+
+    public func meta(_ key: String) -> String? {
+        query("SELECT value FROM meta WHERE key = ?", [.text(key)]) { $0.optionalString(0) }.first ?? nil
+    }
+
+    public func setMeta(_ key: String, _ value: String) {
+        run("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [.text(key), .text(value)])
+    }
 
     public func cacheEntries() -> [CachedAnswer] {
         query("SELECT question_hash, question_text, field_type, options_json, answer, source, updated_at FROM qa_cache ORDER BY updated_at DESC",
@@ -406,10 +446,76 @@ public final class Database: @unchecked Sendable {
         run("DELETE FROM pending_questions WHERE question_hash = ?", [.text(hash)])
     }
 
-    public func dismissPending(_ hash: String) { run("DELETE FROM pending_questions WHERE question_hash = ?", [.text(hash)]) }
+    /// The person can't answer this question (an ID from another country): remembers that, so forms that require it
+    /// skip the job instead of asking again, and skips the jobs waiting on it.
+    public func declinePending(_ hash: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let q = listPending().first(where: { $0.hash == hash }) else { return }
+        cachePut(hash, question: q.question, fieldType: q.fieldType, options: q.options, answer: "", source: "declined")
+        for id in q.jobIDs {
+            run("UPDATE jobs SET status = ?, notes = ?, updated_at = ? WHERE job_id = ? AND status = ?",
+                [.text(JobStatus.skippedCantAnswer.rawValue), .text(Self.cantAnswerNote(q.question)), .text(Database.now()), .text(id),
+                 .text(JobStatus.needsAnswer.rawValue)])
+        }
+        run("DELETE FROM pending_questions WHERE question_hash = ?", [.text(hash)])
+    }
+
+    public static func cantAnswerNote(_ question: String) -> String {
+        "Skipped: it requires “\(question.prefix(200))”, which you said you can't answer."
+    }
+
+    /// A question waiting for the person that another application to `company` asked.
+    public func pendingQuestion(company: String) -> PendingQuestion? {
+        let c = company.trimmed.lowercased()
+        guard !c.isEmpty else { return nil }
+        return listPending().first { $0.companies.contains { $0.trimmed.lowercased() == c } }
+    }
 
     public func jobHasPending(_ jobID: String) -> Bool {
         query("SELECT job_ids FROM pending_questions") { Database.list($0.string(0)) }.contains { $0.contains(jobID) }
+    }
+
+    // MARK: - accounts made on careers sites
+
+    /// What the app did about the account on a careers site.
+    public enum AccountHow: String, Sendable {
+        /// It made the account.
+        case made
+        /// It signed in to one that was there (with the portal password).
+        case signedIn = "signed_in"
+        /// The site had an account for the email with another password: it reset that to the portal password.
+        case reset
+    }
+
+    public struct Account: Sendable, Equatable, Identifiable {
+        public var host: String
+        public var email: String
+        public var how: AccountHow
+        public var date: Date?
+        public var id: String { host }
+    }
+
+    /// Remembers an account on a careers site that the portal password opens (so later applications sign in).
+    /// A reset is kept as such: it tells the person their old password there no longer works.
+    public func noteAccount(host: String, email: String, how: AccountHow = .made) {
+        run("""
+            INSERT INTO accounts (host, email, created_at, how) VALUES (?, ?, ?, ?) ON CONFLICT(host) DO UPDATE SET email=excluded.email,
+            how=CASE WHEN excluded.how = 'reset' OR accounts.how IS NULL THEN excluded.how ELSE accounts.how END,
+            created_at=CASE WHEN excluded.how = 'reset' THEN excluded.created_at ELSE accounts.created_at END
+            """, [.text(host.lowercased()), .text(email), .text(Database.now()), .text(how.rawValue)])
+    }
+
+    /// The careers sites with an account the portal password opens, newest first (never another company's sign-in
+    /// page, which older versions could note by mistake).
+    public func accounts() -> [Account] {
+        query("SELECT host, email, how, created_at FROM accounts ORDER BY created_at DESC") {
+            Account(host: $0.string(0), email: $0.string(1), how: AccountHow(rawValue: $0.string(2)) ?? .made, date: Database.date($0.string(3)))
+        }.filter { SiteRouter.identityProvider(URL(string: "https://\($0.host)")) == nil }
+    }
+
+    public func hasAccount(host: String) -> Bool {
+        (query("SELECT COUNT(*) FROM accounts WHERE host = ?", [.text(host.lowercased())]) { $0.int(0) }.first ?? 0) > 0
     }
 
     // MARK: - facts the user taught the app
@@ -441,6 +547,31 @@ public final class Database: @unchecked Sendable {
     public func finishRun(_ id: Int64, sent: Int, prepared: Int, needsAnswer: Int, failed: Int, note: String) {
         run("UPDATE runs SET finished_at=?, sent=?, prepared=?, needs_answer=?, failed=?, note=? WHERE id=?",
             [.text(Database.now()), .int(Int64(sent)), .int(Int64(prepared)), .int(Int64(needsAnswer)), .int(Int64(failed)), .text(note), .int(id)])
+    }
+
+    /// Runs whose end was never written (the app quit before the job in progress wound down, or crashed): ended at
+    /// their last job, with what they did counted from the jobs they touched.
+    public func closeUnfinishedRuns(note: String = "Stopped when the app quit.") {
+        let open = query("SELECT id, started_at FROM runs WHERE finished_at IS NULL OR finished_at = ''") { ($0.int64(0), $0.string(1)) }
+        for (id, start) in open {
+            let next = query("SELECT started_at FROM runs WHERE id > ? ORDER BY id LIMIT 1", [.int(id)]) { $0.string(0) }.first
+            var sql = "SELECT status, COUNT(*), MAX(updated_at) FROM jobs WHERE updated_at >= ?"
+            var args: [Value] = [.text(start)]
+            if let next {
+                sql += " AND updated_at < ?"
+                args.append(.text(next))
+            }
+            var counts: [String: Int] = [:]
+            var last = start
+            for (status, n, latest) in query(sql + " GROUP BY status", args, { ($0.string(0), $0.int(1), $0.string(2)) }) {
+                counts[status] = n
+                if latest > last { last = latest }
+            }
+            let failed = (counts[JobStatus.failedForm.rawValue] ?? 0) + (counts[JobStatus.failedOTPTimeout.rawValue] ?? 0)
+            run("UPDATE runs SET finished_at=?, sent=?, prepared=?, needs_answer=?, failed=?, note=? WHERE id=?",
+                [.text(last), .int(Int64(counts[JobStatus.applied.rawValue] ?? 0)), .int(Int64(counts[JobStatus.practiceComplete.rawValue] ?? 0)),
+                 .int(Int64(counts[JobStatus.needsAnswer.rawValue] ?? 0)), .int(Int64(failed)), .text(note), .int(id)])
+        }
     }
 
     public func recentRuns(limit: Int = 20) -> [RunRecord] {

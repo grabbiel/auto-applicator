@@ -75,7 +75,20 @@ public final class JobRunner {
         onEvent(.phase("Checking your LinkedIn sign-in"))
         guard await web.linkedInSignedIn() else { throw RunError.signedOut }
         if ai == nil { onEvent(.warning("The AI isn't available, so only questions it already knows will be answered.")) }
+        // Without LinkedIn's number for the place, signed-in searches show jobs near the profile's location instead.
+        let place = settings.search.location.trimmed
+        let geoId = place.isEmpty ? nil : await web.linkedInGeoId(for: place)
+        if !place.isEmpty && geoId == nil {
+            onEvent(.warning("LinkedIn didn't recognize “\(place)”, so it may show jobs near your LinkedIn profile's location. Try a city, state or country in Job search › Where."))
+        }
 
+        // Answers worked out from an older profile (an address since corrected) are worked out again.
+        let fingerprint = profile.fingerprint
+        if db.meta("profile") != fingerprint {
+            let forgotten = db.forgetDerivedAnswers()
+            if forgotten > 0 { Log.info("The profile changed: forgot \(forgotten) answer(s) worked out from the old one") }
+            db.setMeta("profile", fingerprint)
+        }
         let answerer = Answerer(profile: profile, db: db, ai: ai, batchSize: ai?.batchSize ?? 6)
         let verifier = EmailVerifier(secrets: secrets, ai: ai)
         let runID = db.startRun(practice: practice)
@@ -84,13 +97,27 @@ public final class JobRunner {
                          note: summary.note)
         }
         do {
+            // Jobs that waited for answers the person has now given: finish them first, whether or not the search
+            // shows them again.
+            let answered = db.answeredJobs()
+            if !answered.isEmpty { onEvent(.phase("Finishing \(answered.count) application\(answered.count == 1 ? "" : "s") you answered questions for")) }
+            for job in answered {
+                if quotaReached(settings) { break }
+                try Task.checkCancellation()
+                let card = JobCard(id: job.id, title: job.title, company: job.company, location: job.location, applied: false)
+                try await consider(card, settings: settings, profile: profile, secrets: secrets, answerer: answerer, verifier: verifier)
+            }
             queryLoop: for keywords in queries {
                 for page in 0..<settings.search.maxPages {
                     if quotaReached(settings) { break queryLoop }
                     try Task.checkCancellation()
                     onEvent(.phase("Searching “\(keywords)” — page \(page + 1)"))
-                    let cards = try await web.searchPage(keywords: keywords, search: settings.search, page: page)
-                    for card in cards {
+                    let cards = try await web.searchPage(keywords: keywords, search: settings.search, geoId: geoId, page: page)
+                    let fitting = cards.filter { LinkedIn.fits($0, settings.search) }
+                    if fitting.count < cards.count {
+                        Log.info("Left out \(cards.count - fitting.count) of \(cards.count) jobs on page \(page + 1) for “\(keywords)”: not your workplace or level")
+                    }
+                    for card in fitting {
                         if quotaReached(settings) { break queryLoop }
                         try await consider(card, settings: settings, profile: profile, secrets: secrets, answerer: answerer, verifier: verifier)
                     }
@@ -124,6 +151,18 @@ public final class JobRunner {
 
         summary.looked += 1
         onEvent(.jobStarted(card))
+        // Another application to this company waits for the person's answer, and this one would most likely ask it
+        // too: it waits with it instead of going through the company's site again (TCS asked four times for a PAN).
+        if let waiting = db.pendingQuestion(company: card.company) {
+            db.addPending(waiting.hash, question: waiting.question, fieldType: waiting.fieldType, options: waiting.options, jobID: card.id,
+                          company: card.company)
+            let result = ApplyResult(.needsAnswer, notes: "Waits for your answer to “\(waiting.question.prefix(200))”, which another \(card.company) application asked.")
+            db.upsertJob(card.id, status: .needsAnswer, title: card.title, company: card.company, location: card.location,
+                         url: card.url.absoluteString, notes: result.notes)
+            summary.needsAnswer += 1
+            onEvent(.jobFinished(card, nil, result))
+            return
+        }
         var ats: ATSType?
         var result: ApplyResult
         do {
@@ -148,19 +187,39 @@ public final class JobRunner {
                 } else {
                     onEvent(.step("Opening the company's site"))
                     try await web.openExternalApplication()
-                    var detected = web.url.map(SiteRouter.detect) ?? .generic
-                    if detected == .generic { detected = try await SiteRouter.resolveEmbedded(web) }
-                    ats = detected
-                    onEvent(.step("Applying through \(detected.label)"))
-                    result = try await SiteRouter.handler(detected).init(web: web, ctx: ctx).apply()
+                    Log.info("LinkedIn's Apply opened \(web.url?.absoluteString.prefix(300) ?? "nothing")")
+                    var reach = try await SiteRouter.reachApplication(web, step: { [weak self] in self?.onEvent(.step($0)) })
+                    // A careers site that opened in another country's version (TCS's India site asks for an Indian tax
+                    // ID): its version for the job's country.
+                    if case .ready = reach, let local = SiteRouter.countryVersion(web.url, jobLocation: card.location) {
+                        onEvent(.step("Opening the site's version for \(card.location)"))
+                        Log.info("Opening the site's version for the job's country: \(local.absoluteString)")
+                        try await web.load(local)
+                        try await web.sleep(3)
+                        reach = try await SiteRouter.reachApplication(web, step: { [weak self] in self?.onEvent(.step($0)) })
+                    }
+                    switch reach {
+                    case .stop(let note):
+                        ats = web.url.map(SiteRouter.detect) ?? .generic
+                        result = await GenericHandler(web: web, ctx: ctx).stop(note)
+                    case .ready(let detected):
+                        ats = detected
+                        onEvent(.step("Applying through \(detected.label)"))
+                        result = try await SiteRouter.handler(detected).init(web: web, ctx: ctx).apply()
+                    }
                     if result.externalURL == nil { result.externalURL = web.url?.absoluteString }
                 }
             }
         } catch is CancellationError {
             throw CancellationError()
+        } catch RunError.signedOut {
+            throw RunError.signedOut
         } catch {
             Log.error("Job \(card.id) failed: \(error.localizedDescription)")
-            result = ApplyResult(.failedForm, notes: "Browser problem: \(error.localizedDescription.prefix(200))")
+            // The page as it was (LinkedIn's Apply that opened nothing, a dialog the app didn't know), to look into later.
+            let page = await ApplicationHandler.savePage(web, paths: paths, tag: "Stopped", company: card.company, title: card.title)
+            result = ApplyResult(.failedForm, notes: "Browser problem: \(error.localizedDescription.prefix(200))", evidence: page,
+                                 externalURL: web.url?.absoluteString)
         }
 
         db.upsertJob(card.id, status: result.status, title: card.title, company: card.company, location: card.location, ats: ats,

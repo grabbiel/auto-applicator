@@ -175,7 +175,8 @@ func makeCloudTestAgent() async throws -> WebAgent {
         }
         var c = URLComponents(url: url, resolvingAgainstBaseURL: false)
         c?.query = nil
-        guard let page = c?.url?.absoluteString, let html = TestPages.html[page] else { return nil }
+        // The page a test set for this address, with or without its query.
+        guard let html = TestPages.html[url.absoluteString] ?? c?.url.flatMap({ TestPages.html[$0.absoluteString] }) else { return nil }
         return (Data(html.utf8), "text/html; charset=utf-8")
     }
     return WebAgent(cloud: cloud)

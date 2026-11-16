@@ -28,9 +28,11 @@ public struct Resolution: Sendable {
     public var unresolved: [FieldSpec] = []
     /// Optional fields without a confident answer: left empty.
     public var leftBlank: [FieldSpec] = []
+    /// Required fields the person said they can't answer: the job is skipped for good.
+    public var declined: [FieldSpec] = []
     /// Where each answer came from: "cache", "profile", "memory" or "llm:high" / "llm:medium".
     public var sources: [String: String] = [:]
-    public var blocked: Bool { !unresolved.isEmpty }
+    public var blocked: Bool { !unresolved.isEmpty || !declined.isEmpty }
 }
 
 /// Answers form fields: answers the user gave before → the profile → similar questions the user answered → the
@@ -60,6 +62,36 @@ public final class Answerer: @unchecked Sendable {
         return job.company.isEmpty || !norm(f.label).contains(norm(job.company))
     }
 
+    static let placeholderLabel = Regex(#"^((please )?(select|choose)( one| an option| an answer)?|search|-+|textbox|combobox|dropdown|type here)$"#)
+
+    /// The saved-answer key: the question with its section when the label alone is ambiguous.
+    static func hash(_ f: FieldSpec) -> String { questionHash(f.contextLabel, f.type.rawValue, f.options) }
+
+    /// An answer straight from the profile: its rules, a title from its gender, its skills for a skills box.
+    func fromProfile(_ f: FieldSpec, job: JobContext) -> String? {
+        if let ruled = coerceAnswer(f, ProfileRules.answer(profile, f)) { return ruled }
+        if let title = ProfileRules.honorific(profile, f) { return title }
+        if let worked = coerceAnswer(f, ProfileRules.formerEmployee(profile, f, company: job.company)) { return worked }
+        if [.text, .combobox].contains(f.type) || f.maxChoices > 1, ProfileRules.skillsLabel.matches(norm(f.label)) {
+            return ProfileRules.skills(profile, job: job, limit: f.maxChoices > 1 ? f.maxChoices : 8)
+        }
+        return nil
+    }
+
+    /// The same answer written another way: "(512) 555-0142" and "5125550142", "OR - Oregon" and "Oregon".
+    static func sameAnswer(_ mine: String, _ current: String) -> Bool {
+        // A link is the same only in the same form: sites turn away "linkedin.com/in/…" without https://.
+        if Regex(#"^(https?://|www\.)|\.(com|org|net|io|dev|me)(/|$)"#).matches(mine.trimmed) {
+            return mine.trimmed.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "/")) ==
+                current.trimmed.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        }
+        let a = norm(mine).filter { $0.isLetter || $0.isNumber }, b = norm(current).filter { $0.isLetter || $0.isNumber }
+        if a == b || (min(a.count, b.count) >= 4 && (a.contains(b) || b.contains(a))) { return true }
+        let da = mine.filter(\.isNumber), db = current.filter(\.isNumber)
+        if da.count >= 7, db.count >= 7, da.hasSuffix(db) || db.hasSuffix(da) { return true }
+        return matchOption(mine, [current]) != nil
+    }
+
     public func resolve(_ fields: [FieldSpec], job: JobContext, feedback: [String: String] = [:]) async -> Resolution {
         var res = Resolution()
         var todo: [FieldSpec] = []
@@ -67,8 +99,45 @@ public final class Answerer: @unchecked Sendable {
 
         for f in fields where f.type != .file {
             let fb = feedback[f.id]
+            // The person's own details beat what a site read off the resume: Workday's "linkedin.com/in/…" (which it then
+            // turns away), Blue Yonder's "Peru" for Country (which made the US phone number invalid).
+            if !f.currentValue.isEmpty, !["Work experience", "Education", "References", "Emergency contact", "Referral"].contains(f.section),
+               ProfileRules.ownDetailsLabel.matches(norm(f.label)), let mine = fromProfile(f, job: job), !Self.sameAnswer(mine, f.currentValue) {
+                res.answers[f.id] = mine
+                res.sources[f.id] = "profile"
+                continue
+            }
+            // A middle name the site read off the resume that is really the last (or first) name (Paylocity copied the last name there):
+            // emptied; the profile has no middle name.
+            if ProfileRules.middleLabel.matches(norm(f.label)), f.type == .text, !f.currentValue.trimmed.isEmpty,
+               [profile.personal.lastName, profile.personal.firstName].contains(where: { !$0.trimmed.isEmpty && norm($0) == norm(f.currentValue) }) {
+                res.answers[f.id] = ""
+                res.sources[f.id] = "profile"
+                continue
+            }
             if fb == nil && !f.currentValue.isEmpty && f.error.isEmpty { continue }  // already filled (e.g. by LinkedIn)
-            let qh = questionHash(f.label, f.type.rawValue, f.options)
+            // A box named only by its placeholder ("Select"): its question wasn't found, and any answer would be a guess
+            // at a question nobody read (Rippling's lists all got "Yes", "please pick the opposite of Yes" too).
+            if Self.placeholderLabel.matches(norm(f.label)) {
+                park(f)
+                continue
+            }
+            let qh = Self.hash(f)
+            if db.cacheSource(qh) == "declined" {
+                if f.required { res.declined.append(f) } else { res.leftBlank.append(f) }
+                continue
+            }
+            // What the profile says beats an answer the AI saved before (TCS's skills as "Java (1); C# (1); …"); the
+            // person's own answers still come first.
+            let personal = ["user", "edited"].contains(db.cacheSource(qh) ?? "")
+            // Also when the form says a box it was given is empty (it lost the answer when the page redrew, Serco's
+            // "Mobile Phone"): the profile's answer again, not a question for the person.
+            if fb == nil || f.currentValue.trimmed.isEmpty, !personal, let given = fromProfile(f, job: job) {
+                if db.cacheSource(qh) != nil, db.cacheGet(qh) != given { db.cacheDelete(qh) }  // a guess the profile corrects
+                res.answers[f.id] = given
+                res.sources[f.id] = "profile"
+                continue
+            }
             if fb != nil && !f.currentValue.isEmpty {
                 // The form rejected the value we entered: forget it and ask the AI with the error message.
                 if let source = db.cacheSource(qh), source != "user", source != "edited" { db.cacheDelete(qh) }
@@ -76,16 +145,42 @@ public final class Answerer: @unchecked Sendable {
                 continue
             }
             if let cached = coerceAnswer(f, db.cacheGet(qh)) {
-                res.answers[f.id] = cached
-                res.sources[f.id] = "cache"
-                continue
+                if plausible(f, cached) {
+                    res.answers[f.id] = cached
+                    res.sources[f.id] = "cache"
+                    continue
+                }
+                // A wrong answer the AI saved earlier (e.g. a salary for a ZIP code): forget it.
+                if let source = db.cacheSource(qh), source != "user", source != "edited" { db.cacheDelete(qh) }
             }
-            if let ruled = coerceAnswer(f, ProfileRules.answer(profile, f)) {
-                res.answers[f.id] = ruled
+            if let given = fromProfile(f, job: job) {
+                res.answers[f.id] = given
                 res.sources[f.id] = "profile"
                 continue
             }
-            if let remembered = memory.similarAnswer(for: f) {
+            if ProfileRules.isHonorific(f) {
+                park(f)  // "Mr." or "Ms.": only the person can say (never guessed from a name)
+                continue
+            }
+            if ProfileRules.middleLabel.matches(norm(f.label)) {
+                park(f)  // the profile has no middle name: never guessed (TCS's "M.I." got the full name)
+                continue
+            }
+            if ProfileRules.extensionLabel.matches(norm(f.label)) && !f.required {
+                res.leftBlank.append(f)  // no extension in the profile (Blue Yonder's got the whole number)
+                continue
+            }
+            if ProfileRules.formerJobDetail.matches(norm(f.label)) && !f.required
+                && ProfileRules.formerEmployee(profile, FieldSpec(id: "", label: "have you previously worked for \(job.company)", type: .radio,
+                                                                  options: ["Yes", "No"]), company: job.company) != "Yes" {
+                res.leftBlank.append(f)  // "Who was your Manager?" here: for former employees only
+                continue
+            }
+            if ["References", "Emergency contact", "Referral"].contains(f.section) && FieldSpec.ambiguous.matches(norm(f.label)) {
+                park(f)  // another person's name, phone or email: only the person can say
+                continue
+            }
+            if let remembered = memory.similarAnswer(for: f), plausible(f, remembered) {
                 res.answers[f.id] = remembered
                 res.sources[f.id] = "memory"
                 continue
@@ -124,7 +219,7 @@ public final class Answerer: @unchecked Sendable {
             let corpus = profileTokens.union(contentTokens(job.description)).union(contentTokens(job.title))
                 .union(contentTokens(job.company)).union(contentTokens(memories.joined(separator: "\n")))
             for f in batch {
-                guard var a = byID[f.id], let value = coerceAnswer(f, a.answer) else {
+                guard var a = byID[f.id], let value = coerceAnswer(f, a.answer), plausible(f, value) else {
                     park(f)
                     continue
                 }
@@ -139,7 +234,7 @@ public final class Answerer: @unchecked Sendable {
                 res.answers[f.id] = value
                 res.sources[f.id] = "llm:\(a.confidence.rawValue)"
                 if cacheable(f, job) {
-                    db.cachePut(questionHash(f.label, f.type.rawValue, f.options), question: f.label, fieldType: f.type.rawValue,
+                    db.cachePut(Self.hash(f), question: f.contextLabel, fieldType: f.type.rawValue,
                                 options: f.options, answer: value, source: "llm:\(a.confidence.rawValue)")
                 }
             }
@@ -161,7 +256,7 @@ public final class Answerer: @unchecked Sendable {
 
     public func flagUnresolved(_ res: Resolution, jobID: String, company: String) {
         for f in res.unresolved {
-            db.addPending(questionHash(f.label, f.type.rawValue, f.options), question: f.label, fieldType: f.type.rawValue,
+            db.addPending(Self.hash(f), question: f.contextLabel, fieldType: f.type.rawValue,
                           options: f.options.filter { !isPlaceholderOption($0) }, jobID: jobID, company: company)
         }
     }
@@ -215,4 +310,32 @@ public enum ProfileText {
     }
 
     static func fmt(_ v: Double) -> String { v == v.rounded() ? String(Int(v)) : String(format: "%.1f", v) }
+}
+
+/// Whether an answer could be right for the field at all, whatever its source: a ZIP code has digits and no currency,
+/// an email has an @, a year is a year. (The AI once put a salary, "80000 USD", into "Postal Code".)
+func plausible(_ f: FieldSpec, _ answer: String) -> Bool {
+    let label = norm(f.label)
+    let a = answer.trimmed
+    guard !a.isEmpty, !f.hasOptions, f.type != .checkbox else { return true }
+    if Regex(#"\b(zip|postal)\b|postcode"#).matches(label) {
+        // Postal codes have digits and at most two letters in a row (SW1A 1AA, K1A 0B1); "80000 USD" is a salary.
+        return Regex(#"^[A-Za-z0-9][A-Za-z0-9 -]{1,9}$"#, []).fullMatch(a) && a.contains(where: \.isNumber) && !Regex(#"[A-Za-z]{3,}"#, []).matches(a)
+    }
+    if f.type == .email || Regex(#"^(e-?mail|email address)$"#).matches(label) { return a.contains("@") && !a.contains(" ") }
+    if f.type == .tel || Regex(#"\b(phone|mobile|cell)( number)?$"#).matches(label) {
+        return a.filter(\.isNumber).count >= 7 && !Regex(#"[a-z]{3,}"#).matches(a.lowercased())
+    }
+    if Regex(#"\byear$|^year\b|\(yyyy\)"#).matches(label) { return Regex(#"^(19|20)\d\d$"#, []).fullMatch(a) }
+    if Regex(#"\bmonth$"#).matches(label) {
+        return Regex(#"^(0?[1-9]|1[0-2]|jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|june?|july?|aug(ust)?|sep(t|tember)?|oct(ober)?|nov(ember)?|dec(ember)?)$"#)
+            .fullMatch(a.lowercased())
+    }
+    if f.placeholder == "YYYY-MM" { return Regex(#"^(19|20)\d\d-(0[1-9]|1[0-2])$"#, []).fullMatch(a) }
+    if Regex(#"^(first|last|middle|given|family) name$|^(full |legal )?name$"#).matches(label) { return !a.contains(where: \.isNumber) }
+    if Regex(#"^city$|\bcity$"#).matches(label) { return !a.contains(where: \.isNumber) }
+    if f.type == .url || Regex(#"^(your )?(linkedin|github|portfolio|website|personal website|personal site)( profile)?( url| link| address)?$|\burl\b"#).matches(label) {
+        return a.contains(".") && !a.contains(" ")
+    }
+    return true
 }

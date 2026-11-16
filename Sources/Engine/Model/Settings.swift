@@ -45,13 +45,15 @@ public struct Settings: Codable, Equatable, Sendable {
     public var tourComplete = false
     /// Runs use the cloud browser (Chrome in the owner's AWS account) instead of the built-in one.
     public var cloudBrowser = false
+    /// The cloud browser has a LinkedIn sign-in made inside it (LinkedIn ends sign-ins copied over from this Mac).
+    public var cloudLinkedIn = false
 
     public init() {}
 
     enum CodingKeys: String, CodingKey {
         case search, filters, limits, schedule, ai
         case practiceMode = "practice_mode", setupComplete = "setup_complete", tourComplete = "tour_complete"
-        case cloudBrowser = "cloud_browser"
+        case cloudBrowser = "cloud_browser", cloudLinkedIn = "cloud_linkedin"
     }
 
     public init(from decoder: Decoder) throws {
@@ -65,6 +67,7 @@ public struct Settings: Codable, Equatable, Sendable {
         setupComplete = (try? c.decodeIfPresent(Bool.self, forKey: .setupComplete)) ?? false
         tourComplete = (try? c.decodeIfPresent(Bool.self, forKey: .tourComplete)) ?? false
         cloudBrowser = (try? c.decodeIfPresent(Bool.self, forKey: .cloudBrowser)) ?? false
+        cloudLinkedIn = (try? c.decodeIfPresent(Bool.self, forKey: .cloudLinkedIn)) ?? false
     }
 }
 
