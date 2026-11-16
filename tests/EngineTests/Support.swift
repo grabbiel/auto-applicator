@@ -48,6 +48,8 @@ final class FakeModel: LanguageModel, @unchecked Sendable {
     var evidence = "Backend engineer building Python services"
     var compact = false
     private(set) var calls: [[String]] = []          // labels per form call
+    private(set) var prompts: [String] = []          // every form call's prompt
+    var failure: Error?                              // thrown by every form call when set
     private(set) var feedback: [[String]] = []       // labels that came with a form error
     private(set) var coverLetters = 0
 
@@ -67,6 +69,8 @@ final class FakeModel: LanguageModel, @unchecked Sendable {
         }
         if keys.contains("code") { return ["code": "", "verification_url": ""] }
         // form fields: lines like `field1: "Label" (type, required)` and an optional rejection note below
+        prompts.append(prompt)
+        if let failure { throw failure }
         var out: [String: Any] = [:]
         var labels: [String] = []
         var rejected: [String] = []

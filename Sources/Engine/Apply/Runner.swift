@@ -47,16 +47,20 @@ public final class JobRunner {
     let paths: AppPaths
     let web: WebAgent
     let ai: AIService?
+    /// The cloud AI, for questions the on-device AI couldn't answer (runs in the cloud browser only).
+    let helper: AIService?
     let db: Database
     let practice: Bool
     let onEvent: (RunEvent) -> Void
     private var summary: RunSummary
 
-    public init(paths: AppPaths, db: Database, web: WebAgent, ai: AIService?, practice: Bool, onEvent: @escaping (RunEvent) -> Void) {
+    public init(paths: AppPaths, db: Database, web: WebAgent, ai: AIService?, helper: AIService? = nil, practice: Bool,
+                onEvent: @escaping (RunEvent) -> Void) {
         self.paths = paths
         self.db = db
         self.web = web
         self.ai = ai
+        self.helper = helper
         self.practice = practice
         self.onEvent = onEvent
         summary = RunSummary(practice: practice)
@@ -74,7 +78,10 @@ public final class JobRunner {
 
         onEvent(.phase("Checking your LinkedIn sign-in"))
         guard await web.linkedInSignedIn() else { throw RunError.signedOut }
-        if ai == nil { onEvent(.warning("The AI isn't available, so only questions it already knows will be answered.")) }
+        if ai == nil {
+            onEvent(.warning(helper == nil ? "The AI isn't available, so only questions it already knows will be answered."
+                : "The on-device AI isn't available, so new questions go to the cloud AI (\(helper!.displayName))."))
+        }
         // Without LinkedIn's number for the place, signed-in searches show jobs near the profile's location instead.
         let place = settings.search.location.trimmed
         let geoId = place.isEmpty ? nil : await web.linkedInGeoId(for: place)
@@ -89,7 +96,7 @@ public final class JobRunner {
             if forgotten > 0 { Log.info("The profile changed: forgot \(forgotten) answer(s) worked out from the old one") }
             db.setMeta("profile", fingerprint)
         }
-        let answerer = Answerer(profile: profile, db: db, ai: ai, batchSize: ai?.batchSize ?? 6)
+        let answerer = Answerer(profile: profile, db: db, ai: ai, helper: helper, batchSize: ai?.batchSize ?? 6)
         let verifier = EmailVerifier(secrets: secrets, ai: ai)
         let runID = db.startRun(practice: practice)
         defer {

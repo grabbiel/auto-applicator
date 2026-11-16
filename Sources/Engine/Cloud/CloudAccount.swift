@@ -12,10 +12,38 @@ public struct CloudConfig: Codable, Sendable, Equatable {
     public var browserProfileId: String
     /// Google and Apple, when the sign-in page offers them ("Google", "SignInWithApple"); missing in older files.
     public var signInProviders: [String]?
+    /// The cloud AI: the function only a signed-in user may call, and the model behind it ("us.amazon.nova-2-lite-v1:0").
+    /// Missing in files written before it existed.
+    public var helperFunction: String?
+    public var helperModel: String?
 
     /// The offered providers as people call them.
     public var providerNames: [String] {
         (signInProviders ?? []).map { $0 == "SignInWithApple" ? "Apple" : $0 }
+    }
+
+    /// The cloud AI as people call it: "Amazon Nova 2 Lite", "Claude Sonnet 4.6".
+    public var helperName: String {
+        guard let id = helperModel, !id.isEmpty else { return "The cloud AI" }
+        return Self.modelName(id)
+    }
+
+    /// "us.anthropic.claude-haiku-4-5-20251001-v1:0" → "Claude Haiku 4.5", "us.amazon.nova-2-lite-v1:0" → "Amazon Nova 2 Lite".
+    static func modelName(_ id: String) -> String {
+        let parts = id.split(separator: ".", maxSplits: 2).map(String.init)
+        guard parts.count == 3, let name = parts[2].split(separator: ":").first else { return id }
+        var words: [String] = []
+        var lastWasNumber = false
+        for w in name.split(separator: "-").map(String.init) where !Regex(#"^(v\d+|\d{8})$"#).fullMatch(w) {
+            let number = w.allSatisfy { $0.isNumber || $0 == "." }
+            if number && lastWasNumber {
+                words[words.count - 1] += "." + w  // "4-6" → "4.6"
+            } else {
+                words.append(["gpt", "glm", "oss"].contains(w) ? w.uppercased() : w.prefix(1).uppercased() + w.dropFirst())
+            }
+            lastWasNumber = number
+        }
+        return (parts[1] == "amazon" ? "Amazon " : "") + words.joined(separator: " ")
     }
 
     public static let callbackScheme = "autoapplicator"

@@ -89,7 +89,7 @@ enum DebugHooks {
                 model.secrets.cloudEmail = "jane.doe@example.com"
                 model.secrets.cloudRefreshToken = "demo"
                 model.settings.cloudBrowser = true
-                model.cloudTest = CloudTest(ok: true, message: "Working: Chrome started in 2.4 s and LinkedIn recognized you.",
+                model.cloudTest = CloudTest(ok: true, message: "Working: Chrome started in 2.4 s and LinkedIn recognized you. Amazon Nova 2 Lite answered in 1.9 s.",
                                             image: NSImage(named: NSImage.applicationIconName))
                 try? await Task.sleep(for: .milliseconds(400))
                 scrollMain(to: 0.42)

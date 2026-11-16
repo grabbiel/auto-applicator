@@ -363,7 +363,9 @@ public class ApplicationHandler {
         }
         if !res.answers.isEmpty {
             let learned = res.sources.values.filter { $0 == "cache" || $0 == "memory" }.count
-            ctx.step("Filled \(res.answers.count) answer\(res.answers.count == 1 ? "" : "s")" + (learned > 0 ? " (\(learned) from what you taught it)" : ""))
+            let cloud = res.sources.values.filter { $0.hasPrefix("cloud") }.count
+            let notes = (learned > 0 ? ["\(learned) from what you taught it"] : []) + (cloud > 0 ? ["\(cloud) from the cloud AI"] : [])
+            ctx.step("Filled \(res.answers.count) answer\(res.answers.count == 1 ? "" : "s")" + (notes.isEmpty ? "" : " (\(notes.joined(separator: ", ")))"))
         }
         Log.info("Filled \(res.answers.count) field(s) (\(res.leftBlank.count) left blank, \(failures.count) failed)" +
                  (failures.isEmpty ? "" : ": " + failures.prefix(6).map { String($0.prefix(60)) }.joined(separator: "; ")))

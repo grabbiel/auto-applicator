@@ -13,7 +13,9 @@
 #   bash scripts/deploy_cloud.sh --google off         (or --apple off) stop offering it
 # Inviting, listing and revoking don't redeploy an existing stack. Rebuild the app after a deploy.
 # Environment: AWS_PROFILE (default "admin"), AWS_REGION (default us-east-1), AA_STACK (default auto-applicator-cloud),
-# AA_GOOGLE_CLIENT_SECRET (instead of typing it). Tear everything down with:
+# AA_GOOGLE_CLIENT_SECRET (instead of typing it), AA_HELPER_MODEL (the cloud AI: a us.… inference profile, default
+# us.amazon.nova-2-lite-v1:0, then whatever the last deploy used; us.anthropic.claude-sonnet-4-6 once Anthropic's
+# use-case form is submitted in the Bedrock console). Tear everything down with:
 #   aws cloudformation delete-stack --stack-name auto-applicator-cloud
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -32,7 +34,7 @@ while [ $# -gt 0 ]; do
     --apple-team) APPLE_TEAM="${2:?a team ID}"; shift 2 ;;
     --apple-key) APPLE_KEY="${2:?a key ID}"; shift 2 ;;
     --apple-key-file) APPLE_KEY_FILE="${2:?a .p8 file}"; shift 2 ;;
-    -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 64 ;;
   esac
 done
@@ -83,7 +85,7 @@ deploy() {
   aws cloudformation deploy \
     --stack-name "$STACK" \
     --template-file "$ROOT/infra/cloud-browser.yaml" \
-    --parameter-overrides "DomainPrefix=$PREFIX" "GoogleSignIn=$G" "AppleSignIn=$A" \
+    --parameter-overrides "DomainPrefix=$PREFIX" "GoogleSignIn=$G" "AppleSignIn=$A" ${AA_HELPER_MODEL:+"HelperModel=$AA_HELPER_MODEL"} \
     --capabilities CAPABILITY_IAM \
     --tags App=auto-applicator \
     --no-fail-on-empty-changeset
@@ -153,7 +155,9 @@ if [ "$DEPLOYED" = 1 ]; then
   "identityPoolId": "$(out IdentityPoolId)",
   "browserId": "$(out BrowserId)",
   "browserProfileId": "$(out BrowserProfileId)",
-  "signInProviders": [$PROVIDERS]
+  "signInProviders": [$PROVIDERS],
+  "helperFunction": "$(out HelperFunction)",
+  "helperModel": "$(out HelperModel)"
 }
 JSON
   echo "Wrote Resources/CloudConfig.json (rebuild the app to include it)."
@@ -203,4 +207,5 @@ if [ "$LIST" = 1 ]; then
   done <<<"$USERS"
 fi
 [ -n "$OFFERS" ] || [ "$DEPLOYED" = 0 ] || echo "To offer Google or Apple sign-in: bash scripts/deploy_cloud.sh --sign-in-setup"
+[ "$DEPLOYED" = 0 ] || echo "Cloud AI: $(out HelperModel), through the function $(out HelperFunction) (only signed-in users may call it)."
 [ "$DEPLOYED" = 0 ] || echo "Resources: https://$AWS_REGION.console.aws.amazon.com/resource-groups/group/auto-applicator"

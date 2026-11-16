@@ -29,7 +29,8 @@ public final class Memory: @unchecked Sendable {
         for fact in db.facts() {
             list.append(Entry(text: "Fact: \(fact.text)", question: nil, answer: nil, fieldType: nil, tokens: contentTokens(fact.text)))
         }
-        for a in db.cacheEntries() where a.learnedFromUser || a.source == "llm:high" {
+        // The cloud AI's confident answers too: that's how what the stronger model worked out reaches the on-device one.
+        for a in db.cacheEntries() where a.learnedFromUser || a.source == "llm:high" || a.source == "cloud:high" {
             list.append(Entry(text: "Q: \(a.question) A: \(a.answer)", question: a.question, answer: a.learnedFromUser ? a.answer : nil,
                               fieldType: a.fieldType, tokens: contentTokens(a.question)))
         }

@@ -30,30 +30,45 @@ public struct Resolution: Sendable {
     public var leftBlank: [FieldSpec] = []
     /// Required fields the person said they can't answer: the job is skipped for good.
     public var declined: [FieldSpec] = []
-    /// Where each answer came from: "cache", "profile", "memory" or "llm:high" / "llm:medium".
+    /// Where each answer came from: "cache", "profile", "memory", "llm:high" / "llm:medium" (the on-device AI) or
+    /// "cloud:high" / "cloud:medium" (the cloud AI).
     public var sources: [String: String] = [:]
     public var blocked: Bool { !unresolved.isEmpty || !declined.isEmpty }
 }
 
 /// Answers form fields: answers the user gave before → the profile → similar questions the user answered → the
-/// on-device AI, which must cite the profile. An answer the AI isn't confident about is never submitted: if the field
-/// is required, the application is skipped and the question is saved for the user to answer once.
+/// on-device AI, which must cite the profile → for what it couldn't answer, the stronger cloud AI (on runs in the cloud
+/// browser), under the same rules. An answer neither AI is confident about is never submitted: if the field is
+/// required, the application is skipped and the question is saved for the user to answer once.
 public final class Answerer: @unchecked Sendable {
     public let profile: Profile
     public let db: Database
     let ai: FormAnswering?
+    /// The cloud AI, for the questions `ai` couldn't answer (nil when the run isn't in the cloud browser).
+    let helper: FormAnswering?
     public let memory: Memory
     let batchSize: Int
     public let profileText: String
+    /// The profile for the cloud AI: without the email address and phone number, which its questions never need (the
+    /// profile's rules answer those).
+    let cloudProfileText: String
     private let profileTokens: Set<String>
+    /// Questions the cloud AI may still be asked this run: it's for the few the on-device AI misses.
+    private var helperBudget: Int
+    private var helperDown = false
 
-    public init(profile: Profile, db: Database, ai: FormAnswering?, memory: Memory? = nil, batchSize: Int = 6) {
+    public init(profile: Profile, db: Database, ai: FormAnswering?, helper: FormAnswering? = nil, memory: Memory? = nil, batchSize: Int = 6,
+                helperBudget: Int = 60) {
         self.profile = profile
         self.db = db
         self.ai = ai
+        self.helper = helper
         self.memory = memory ?? Memory(db: db)
         self.batchSize = max(1, batchSize)
+        self.helperBudget = helperBudget
         profileText = ProfileText.render(profile)
+        cloudProfileText = profileText.split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.hasPrefix("email:") && !$0.hasPrefix("phone:") }.joined(separator: "\n")
         profileTokens = contentTokens(profileText)
     }
 
@@ -197,30 +212,56 @@ public final class Answerer: @unchecked Sendable {
         }
 
         guard !todo.isEmpty else { return res }
-        guard let ai else {
-            todo.forEach(park)
-            return res
+        var missed = todo
+        if let ai {
+            missed = await ask(ai, todo, batchSize: batchSize, source: "llm", profileText: profileText, job: job, feedback: feedback, into: &res)
         }
-        var start = 0
-        while start < todo.count {
-            let batch = Array(todo[start..<min(start + batchSize, todo.count)])
-            start += batchSize
+        if !missed.isEmpty, let helper, !helperDown, helperBudget > 0, !Task.isCancelled {
+            let asked = Array(missed.prefix(helperBudget))
+            helperBudget -= asked.count
+            Log.info("Asking the cloud AI about \(asked.count) question(s) the on-device AI couldn't answer: "
+                     + asked.prefix(4).map { "\"\($0.label.prefix(50))\"" }.joined(separator: ", "))
+            let still = await ask(helper, asked, batchSize: 8, source: "cloud", profileText: cloudProfileText, job: job, feedback: feedback, into: &res)
+            let answered = asked.count - still.count
+            if answered > 0 {
+                Log.info("The cloud AI answered \(answered) of \(asked.count); the on-device AI sees its confident answers from now on")
+                memory.reload(db: db)
+            }
+            missed = still + missed.dropFirst(asked.count)
+            if helperBudget <= 0 { Log.info("The cloud AI won't be asked again this run (its limit is reached)") }
+        }
+        missed.forEach(park)
+        return res
+    }
+
+    /// Asks one AI about `fields` in batches and keeps the answers that are plausible, cite the profile, the job or what
+    /// the user taught it, and are confident; caches them (source "llm:…" or "cloud:…"). Returns the fields it couldn't
+    /// answer.
+    private func ask(_ model: FormAnswering, _ fields: [FieldSpec], batchSize: Int, source: String, profileText: String, job: JobContext,
+                     feedback: [String: String], into res: inout Resolution) async -> [FieldSpec] {
+        var missed: [FieldSpec] = []
+        for start in stride(from: 0, to: fields.count, by: batchSize) {
+            let batch = Array(fields[start..<min(start + batchSize, fields.count)])
             let memories = memory.relevant(for: batch, limit: 6)
             var byID: [String: FieldAnswer] = [:]
             do {
-                byID = try await ai.answerFields(batch, profileText: profileText, job: job,
-                                                 feedback: feedback.filter { k, _ in batch.contains { $0.id == k } }, memories: memories)
+                byID = try await model.answerFields(batch, profileText: profileText, job: job,
+                                                    feedback: feedback.filter { k, _ in batch.contains { $0.id == k } }, memories: memories)
             } catch is CancellationError {
-                batch.forEach(park)
+                missed += batch
                 continue
+            } catch AIError.unavailable(let why) where source == "cloud" {
+                Log.warn("The cloud AI isn't available, so it won't be asked again this run: \(why)")
+                helperDown = true
+                return missed + fields[start...]
             } catch {
-                Log.warn("AI failed on \(batch.count) field(s): \(error.localizedDescription)")
+                Log.warn("\(source == "cloud" ? "The cloud AI" : "AI") failed on \(batch.count) field(s): \(error.localizedDescription)")
             }
             let corpus = profileTokens.union(contentTokens(job.description)).union(contentTokens(job.title))
                 .union(contentTokens(job.company)).union(contentTokens(memories.joined(separator: "\n")))
             for f in batch {
                 guard var a = byID[f.id], let value = coerceAnswer(f, a.answer), plausible(f, value) else {
-                    park(f)
+                    missed.append(f)
                     continue
                 }
                 if a.confidence != .low && !Self.isGrounded(f, value, a.evidence, corpus) {
@@ -228,18 +269,18 @@ public final class Answerer: @unchecked Sendable {
                     a.confidence = .low
                 }
                 if a.confidence == .low {
-                    park(f)
+                    missed.append(f)
                     continue
                 }
+                let tag = "\(source):\(a.confidence.rawValue)"
                 res.answers[f.id] = value
-                res.sources[f.id] = "llm:\(a.confidence.rawValue)"
+                res.sources[f.id] = tag
                 if cacheable(f, job) {
-                    db.cachePut(Self.hash(f), question: f.contextLabel, fieldType: f.type.rawValue,
-                                options: f.options, answer: value, source: "llm:\(a.confidence.rawValue)")
+                    db.cachePut(Self.hash(f), question: f.contextLabel, fieldType: f.type.rawValue, options: f.options, answer: value, source: tag)
                 }
             }
         }
-        return res
+        return missed
     }
 
     /// The AI must cite words that really occur in the profile, the job or what the user taught it; a number must

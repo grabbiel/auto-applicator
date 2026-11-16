@@ -87,7 +87,8 @@ public struct CachedAnswer: Identifiable, Equatable, Sendable {
     public var fieldType: String
     public var options: [String]
     public var answer: String
-    /// "user" (you answered), "edited" (you changed it), "profile", or "llm:high" / "llm:medium" (the AI decided).
+    /// "user" (you answered), "edited" (you changed it), "profile", "llm:high" / "llm:medium" (the on-device AI decided), or
+    /// "cloud:high" / "cloud:medium" (the cloud AI decided).
     public var source: String
     public var updatedAt: Date?
 
