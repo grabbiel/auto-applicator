@@ -224,26 +224,45 @@ app fills a temporary folder with sample data, saves a PNG of each screen and qu
 
 ### Releases
 
-Bump `VERSION`, then push a matching tag:
+A release is a fix or improvement worth sharing: raise `VERSION` in its pull request (`1.1.0` → `1.1.1` for fixes,
+`1.2.0` for something new). When it's merged, [`release.yml`](.github/workflows/release.yml) tests the app, builds
+the disk image (never with a cloud browser address) and publishes `v<VERSION>` with install steps and the merged pull
+requests as its notes. The download link at the top always points to the newest one.
+
+- Pull requests and main are built and tested by [`test.yml`](.github/workflows/test.yml).
+- Both run on GitHub's `xcode-27` Mac image, which is still a preview: a run can wait in the queue for a machine,
+  and re-running a failed run is safe (it never publishes the same version twice).
+- **Actions › Release › Run workflow** builds the disk image only, as a download on the run's page, to try before
+  releasing.
+- Pushing a tag `v<VERSION>` publishes that commit, or replaces the disk image of a release that exists.
+
+If GitHub's Macs can't build it, publish from your Mac (Xcode 27, on main as pushed) instead:
 
 ```bash
-git tag "v$(cat VERSION)" && git push origin "v$(cat VERSION)"
+bash scripts/publish_local.sh
 ```
 
-[`.github/workflows/release.yml`](.github/workflows/release.yml) builds and tests on macOS, packages the disk image
-(without a cloud configuration) and attaches it to a GitHub release, which the download link above always points to.
+**Signing.** Without signing secrets the app is ad-hoc signed, and the first open needs **Open Anyway** in System
+Settings › Privacy & Security. With an Apple Developer Program membership, add these repository secrets and releases
+are signed with your Developer ID and notarized, so the app opens like any other:
 
-It needs Xcode 27 or newer, which GitHub's Mac machines don't have yet: until they do, its run stops before building
-and publishes nothing. Build and publish from a Mac with Xcode 27 instead, after pushing the tag:
+| Secret | What it holds |
+|---|---|
+| `MACOS_CERTIFICATE_P12` | Your *Developer ID Application* certificate with its private key, exported from Keychain Access as a .p12 file, in base64 |
+| `MACOS_CERTIFICATE_PASSWORD` | The password you gave that .p12 |
+| `NOTARY_KEY_P8` | An App Store Connect API key (Users and Access › Integrations › Team Keys, role *Developer*): the .p8 file |
+| `NOTARY_KEY_ID` | That key's ID |
+| `NOTARY_ISSUER` | The Issuer ID shown above the keys |
+
+Add them under Settings › Secrets and variables › Actions, or from the folder holding the files:
 
 ```bash
-swift test --skip LiveAITests --skip Cloud
+base64 -i cert.p12 | gh secret set MACOS_CERTIFICATE_P12
 ```
 
 ```bash
-AA_CLOUD_CONFIG=none bash scripts/package.sh
+gh secret set NOTARY_KEY_P8 < AuthKey_XXXXXXXXXX.p8
 ```
 
-```bash
-gh release create "v$(cat VERSION)" dist/AutoApplicator.dmg --title "Auto Applicator $(cat VERSION)" --generate-notes --verify-tag
-```
+(`gh secret set NAME` with no input asks for the value, for the other three.) The signature shows the name on the
+Apple account to anyone who inspects the app.
