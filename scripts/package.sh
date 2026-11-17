@@ -4,7 +4,8 @@
 # ~/Library/Application Support/AutoApplicator. Your cloud browser's address (Resources/CloudConfig.json) is included
 # when present; for a copy to give to other people, run with AA_CLOUD_CONFIG=none.
 #   Optional: AA_SIGN_IDENTITY="Developer ID Application: …" signs the app and the disk image, and
-#   AA_NOTARY_PROFILE=<notarytool keychain profile> also notarizes it, so it opens without the "Open Anyway" step.
+#   AA_NOTARY_PROFILE=<notarytool keychain profile> also notarizes it, so it opens without the "Open Anyway" step
+#   (or an App Store Connect API key: AA_NOTARY_KEY=<.p8 file> AA_NOTARY_KEY_ID=… AA_NOTARY_ISSUER=…).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
@@ -75,9 +76,23 @@ hdiutil convert -quiet "$RW" -format ULFO -o "$OUT"   # LZFSE: smaller and faste
 
 if [ -n "${AA_SIGN_IDENTITY:-}" ]; then
   codesign --sign "$AA_SIGN_IDENTITY" --timestamp "$OUT"
+  NOTARY=()
   if [ -n "${AA_NOTARY_PROFILE:-}" ]; then
-    xcrun notarytool submit "$OUT" --keychain-profile "$AA_NOTARY_PROFILE" --wait
+    NOTARY=(--keychain-profile "$AA_NOTARY_PROFILE")
+  elif [ -n "${AA_NOTARY_KEY:-}" ]; then
+    NOTARY=(--key "$AA_NOTARY_KEY" --key-id "$AA_NOTARY_KEY_ID" --issuer "$AA_NOTARY_ISSUER")
+  fi
+  if [ ${#NOTARY[@]} -gt 0 ]; then
+    echo "Notarizing (usually a few minutes)…"
+    RESULT="$(xcrun notarytool submit "$OUT" "${NOTARY[@]}" --wait --output-format json)"
+    STATUS="$(plutil -extract status raw -o - - <<<"$RESULT")"
+    if [ "$STATUS" != Accepted ]; then
+      echo "Apple didn't notarize it ($STATUS). Its report:" >&2
+      xcrun notarytool log "$(plutil -extract id raw -o - - <<<"$RESULT")" "${NOTARY[@]}" >&2 || true
+      exit 1
+    fi
     xcrun stapler staple "$OUT"
+    spctl --assess --type open --context context:primary-signature --verbose "$OUT"
   fi
 fi
 

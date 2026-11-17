@@ -1,47 +1,123 @@
-# Builds, tests and publishes AutoApplicator.dmg when a version tag (v1.0.0, …) is pushed. Run it by hand to get the
-# disk image as a downloadable artifact without publishing. Public builds never include a cloud browser address.
-# Releases need Xcode 27 or newer. Until GitHub's Mac images have it, the run stops before building and the release
-# is built on a Mac instead (README › Releases).
+# Tests the app, builds AutoApplicator.dmg and publishes it as a GitHub release (README › Releases).
+#   - A new VERSION reaching main publishes v<VERSION>: bump it in the pull request of a fix or improvement worth
+#     sharing, and merging it releases.
+#   - Pushing a tag v<VERSION> publishes that commit (or replaces the disk image of an existing release).
+#   - Run by hand (Actions › Release › Run workflow), it only builds the disk image, as a downloadable artifact.
+# Public builds never include a cloud browser address. With the Apple signing secrets set, the app is signed with a
+# Developer ID and notarized; without them it is ad-hoc signed and opens after "Open Anyway" once.
 name: Release
 
 on:
   push:
+    branches: [main]
+    paths: [VERSION]   # not applied to tags: every v* tag runs
     tags: ["v*"]
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  plan:
+    # Decides on a quick Linux machine, so nothing waits for a Mac only to find there's nothing to publish.
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      publish: ${{ steps.plan.outputs.publish }}
+      build: ${{ steps.plan.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: VERSION
+          sparse-checkout-cone-mode: false
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(tr -d '[:space:]' < VERSION)
+          TAG="v$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            echo "Building the disk image only (run by hand)."
+            echo "build=true" >> "$GITHUB_OUTPUT"; echo "publish=false" >> "$GITHUB_OUTPUT"
+          elif [ "$GITHUB_REF_TYPE" = tag ]; then
+            if [ "$GITHUB_REF_NAME" != "$TAG" ]; then
+              echo "::error::The tag $GITHUB_REF_NAME doesn't match VERSION ($VERSION) in that commit."
+              exit 1
+            fi
+            echo "build=true" >> "$GITHUB_OUTPUT"; echo "publish=true" >> "$GITHUB_OUTPUT"
+          elif gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+               || git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+            echo "::notice::$TAG already exists, so this change to VERSION publishes nothing. Raise VERSION to release."
+            echo "build=false" >> "$GITHUB_OUTPUT"; echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Publishing $TAG."
+            echo "build=true" >> "$GITHUB_OUTPUT"; echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
   dmg:
-    # Apple silicon, GitHub's newest image (a new Xcode arrives there first). Its machines are often busy: a job that
-    # gets none within 15 minutes fails unstarted and can simply be re-run.
-    runs-on: macos-26
-    timeout-minutes: 40
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    # GitHub's Apple silicon image with Xcode 27 (a public preview: a run can wait in the queue for a machine, and
+    # simply re-running it is fine). The standard macos-26 image only has Xcode 26.
+    runs-on: xcode-27
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0   # the build number is the commit count
 
       - name: Use Xcode 27 or newer
-        run: |
-          # An Xcode 26 SDK builds a weaker app (see AppleModel.swift), so stop rather than publish one.
-          XCODE=$(ls -d /Applications/Xcode_2[7-9]*.app 2>/dev/null | grep -vi beta | sort -V | tail -1)
-          if [ -z "$XCODE" ]; then
-            echo "::error::This runner image has no Xcode 27 yet. Build the release on a Mac instead (README › Releases)."
-            exit 1
-          fi
-          sudo xcode-select -s "$XCODE"
-          swift --version
+        run: bash scripts/ci_use_xcode.sh
 
       - name: Test
         run: |
           swift build --product AutoApplicator
-          swift test --skip LiveAITests --skip 'Cloud'
+          swift test --skip LiveAITests --skip Cloud
 
-      - name: Check the version matches the tag
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: test "v$(tr -d '[:space:]' < VERSION)" = "$GITHUB_REF_NAME"
+      - name: Load the Developer ID certificate
+        id: signing
+        env:
+          CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
+        run: |
+          if [ -z "$CERTIFICATE_P12" ]; then
+            echo "No Developer ID certificate in the repository secrets: the app will be ad-hoc signed."
+            exit 0
+          fi
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          printf '%s' "$CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$KEYCHAIN" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          # Signs by the certificate's fingerprint, so the name on the Apple account isn't printed in the public log.
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" | awk '/"Developer ID Application:/ {print $2; exit}')
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::MACOS_CERTIFICATE_P12 holds no Developer ID Application certificate with its private key."
+            exit 1
+          fi
+          echo "AA_SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          if [ -n "$NOTARY_KEY_P8" ]; then
+            printf '%s' "$NOTARY_KEY_P8" > "$RUNNER_TEMP/notary.p8"
+            { echo "AA_NOTARY_KEY=$RUNNER_TEMP/notary.p8"; echo "AA_NOTARY_KEY_ID=$NOTARY_KEY_ID"; echo "AA_NOTARY_ISSUER=$NOTARY_ISSUER"; } >> "$GITHUB_ENV"
+            echo "Signing with a Developer ID, then notarizing."
+          else
+            echo "::warning::Signing with a Developer ID without notarizing (no NOTARY_KEY_P8): macOS will still ask for Open Anyway."
+          fi
 
       - name: Build the disk image
         env:
@@ -50,14 +126,29 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: AutoApplicator-dmg
+          name: AutoApplicator-${{ env.VERSION }}
           path: dist/AutoApplicator.dmg
+          retention-days: 14
 
       - name: Publish the release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: needs.plan.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
-            && gh release upload "$GITHUB_REF_NAME" dist/AutoApplicator.dmg --clobber \
-            || gh release create "$GITHUB_REF_NAME" dist/AutoApplicator.dmg --title "Auto Applicator ${GITHUB_REF_NAME#v}" --generate-notes
+          TAG="v$VERSION"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/AutoApplicator.dmg --clobber
+            echo "Replaced the disk image of $TAG."
+          else
+            # The notes: how to install, then the pull requests merged since the last release.
+            gh release create "$TAG" dist/AutoApplicator.dmg --target "$GITHUB_SHA" --latest \
+              --title "Auto Applicator $VERSION" --notes-file .github/release-notes.md --generate-notes
+            echo "Published $TAG."
+          fi
+          echo "::notice::Download: https://github.com/$GITHUB_REPOSITORY/releases/latest/download/AutoApplicator.dmg"
+
+      - name: Remove the signing keychain
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/notary.p8"

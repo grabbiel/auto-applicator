@@ -1,0 +1,29 @@
+# Builds the app and runs the tests on every pull request and on main, so a release never starts from a broken build.
+# The live AI and cloud tests need credentials and are skipped, as are the site surveys (they run only with AA_SURVEY).
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # GitHub's Apple silicon image with Xcode 27 (a public preview: a run can wait in the queue for a machine).
+    runs-on: xcode-27
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Xcode 27 or newer
+        run: bash scripts/ci_use_xcode.sh
+      - name: Build
+        run: swift build --product AutoApplicator
+      - name: Test
+        run: swift test --skip LiveAITests --skip Cloud
