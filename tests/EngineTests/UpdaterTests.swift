@@ -7,7 +7,7 @@ import XCTest
 final class UpdaterTests: XCTestCase {
     private let fm = FileManager.default
     private var dir: URL!
-    private let appID = "io.github.grabbiel.autoapplicator"
+    private let appID = "io.github.grabbiel.autoapplicator.updater-test"  // never the real app's, which macOS routes links to
 
     override func setUpWithError() throws {
         dir = fm.temporaryDirectory.appendingPathComponent("updater-\(UUID().uuidString)", isDirectory: true)
