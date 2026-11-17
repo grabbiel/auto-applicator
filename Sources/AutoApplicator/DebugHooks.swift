@@ -232,7 +232,7 @@ enum DebugHooks {
         db.cachePut("demo-a2", question: "How did you hear about this role?", fieldType: "text", options: [], answer: "LinkedIn", source: "llm:high")
         let run = db.startRun(practice: true)
         db.finishRun(run, sent: 0, prepared: 2, needsAnswer: 1, failed: 0, note: "")
-        model.linkedInState = .signedIn
+        model.localLinkedIn = .signedIn
         model.refreshData()
     }
 

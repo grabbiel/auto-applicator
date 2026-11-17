@@ -17,9 +17,15 @@ public struct FieldSpec: Equatable, Sendable {
     public var placeholder: String
     public var error: String
     public var maxLength: Int?
+    /// The part of the form the field is in, as one of a few known kinds ("Education", "Work experience",
+    /// "References", …), or "" when its heading says nothing useful (a job title, "Apply").
+    public var section: String
+    /// A search box that takes several choices, each becoming a chip ("Skills (Maximum 5)"): up to how many; 0 for
+    /// an ordinary field. Its answer lists them separated by "; ".
+    public var maxChoices = 0
 
     public init(id: String, label: String, type: FieldType = .text, options: [String] = [], required: Bool = false,
-                currentValue: String = "", placeholder: String = "", error: String = "", maxLength: Int? = nil) {
+                currentValue: String = "", placeholder: String = "", error: String = "", maxLength: Int? = nil, section: String = "") {
         self.id = id
         self.label = label
         self.type = type
@@ -29,9 +35,49 @@ public struct FieldSpec: Equatable, Sendable {
         self.placeholder = placeholder
         self.error = error
         self.maxLength = maxLength
+        self.section = FieldSpec.canonicalSection(section)
     }
 
     public var hasOptions: Bool { [.select, .radio, .combobox, .checkboxGroup].contains(type) && !options.isEmpty }
+
+    /// The question as it's saved, asked and remembered: with its section in front when the label alone could mean
+    /// different things ("End date month" in Education or in Work experience; "Phone" for you or for a reference).
+    public var contextLabel: String {
+        section.isEmpty || !FieldSpec.ambiguous.matches(norm(label)) ? plainLabel : "\(section) › \(plainLabel)"
+    }
+
+    /// The label without the page's required marks ("*Start year", "GPA *", "Name (required)"), as it's shown.
+    public var plainLabel: String {
+        var t = label.replacingOccurrences(of: #"\s*\((required|optional)\)\s*$"#, with: "", options: [.regularExpression, .caseInsensitive])
+        t = t.trimmingCharacters(in: CharacterSet(charactersIn: "*✱").union(.whitespacesAndNewlines))
+        return t.isEmpty ? label : t
+    }
+
+    static let ambiguous = Regex(
+        #"^((start|end|from|to|graduation|completion)( date)?( month| year| date)?|month|year|date|dates?( attended| of (employment|attendance))?|"#
+            + #"(job |position )?title|position|role|company( name)?|employer( name)?|organi[sz]ation( name)?|school( name)?|institution|"#
+            + #"degree|discipline|field of study|major|description|responsibilities|summary|location|city|state|country|zip|postal code|"#
+            + #"address( line \d)?|street|(full )?name|first name|last name|e-?mail( address)?|phone( number)?|relationship|"#
+            + #"current(ly)?( (work|working|attend|attending) here)?|i (currently )?(work|attend) here|still (working|attending)|gpa|grade|"#
+            + #"reason for leaving|supervisor|manager)( \d+)?$"#)
+
+    /// One name per kind of section, so the same question in "EDUCATION" and "Your education" is the same question.
+    static func canonicalSection(_ raw: String) -> String {
+        let s = norm(raw)
+        guard !s.isEmpty else { return "" }
+        if Regex(#"referenc"#).matches(s) { return "References" }
+        if Regex(#"emergency"#).matches(s) { return "Emergency contact" }
+        if Regex(#"educat|school|academic|degree|universit"#).matches(s) { return "Education" }
+        if Regex(#"employ|work experience|experience|work history|job history|career history|previous (job|position)|positions? held"#).matches(s) {
+            return "Work experience"
+        }
+        if Regex(#"self[- ]?identif|voluntary|equal (employment )?opportunit|\beeo|demographic|diversity"#).matches(s) { return "Self-identification" }
+        if Regex(#"referr(al|ed)"#).matches(s) { return "Referral" }
+        if Regex(#"mailing address|permanent address|current address|^address"#).matches(s) { return "Address" }
+        if Regex(#"certif|licen[cs]"#).matches(s) { return "Certifications" }
+        if Regex(#"^languages?$"#).matches(s) { return "Languages" }
+        return ""
+    }
 }
 
 public struct JobContext: Equatable, Sendable {

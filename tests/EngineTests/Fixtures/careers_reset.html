@@ -1,0 +1,85 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Applying to Software Engineer</title>
+<style>.field { margin: 8px 0; } .error { color: #c00; }</style></head>
+<body>
+<!-- A careers site whose sign-up page is the way in, for an email that already has an account there with another
+     password: "An account with this email already exists." under the email box; a sign-in page with "Forgot your
+     password?"; a page asking for the email; the emailed link (?step=reset) to set a new password; then the
+     application. The step and a test's token are in the address (?step=…&t=…). -->
+<main id="main"></main>
+<script>
+const q = new URLSearchParams(location.search);
+const step = q.get('step') || 'register', t = q.get('t') || 'x';
+const main = document.getElementById('main');
+const go = s => { location.search = '?step=' + s + '&t=' + t; };
+const val = id => document.getElementById(id).value;
+const log = k => sessionStorage.setItem(k + '-' + t, String(Number(sessionStorage.getItem(k + '-' + t) || 0) + 1));
+if (step === 'register') {
+  main.innerHTML = `
+    <h1>Software Engineer</h1><h2>Create your candidate account</h2>
+    <form onsubmit="return false">
+      <div class="field"><label for="email">Email *</label><input id="email" type="email" required>
+        <div id="email-error" class="error" role="alert" hidden>An account with this email already exists.</div></div>
+      <div class="field"><label for="pw">Password *</label><input id="pw" type="password" required></div>
+      <div class="field"><label for="pw2">Confirm password *</label><input id="pw2" type="password" required></div>
+      <button type="submit" id="create">Create account</button>
+    </form>
+    <p>Already have an account? <a id="to-login" href="#">Sign in</a></p>`;
+  document.getElementById('to-login').onclick = () => { go('login'); return false; };
+  document.getElementById('create').onclick = () => {
+    if (!val('email') || !val('pw') || val('pw') !== val('pw2')) return;
+    log('createTried');
+    document.getElementById('email-error').hidden = false;
+    document.getElementById('email').setAttribute('aria-invalid', 'true');
+  };
+} else if (step === 'login') {
+  main.innerHTML = `
+    <h1>Sign in</h1>
+    <form onsubmit="return false">
+      <label for="user">Email</label><input id="user" type="email" name="username">
+      <label for="pass">Password</label><input id="pass" type="password" name="password">
+      <div id="wrong" class="error" role="alert" hidden>Wrong email or password.</div>
+      <button type="submit" id="signin">Sign in</button>
+    </form>
+    <a id="forgot" href="#">Forgot your password?</a>`;
+  document.getElementById('forgot').onclick = () => { go('forgot'); return false; };
+  document.getElementById('signin').onclick = () => {
+    log('signIns');
+    if (val('user') && localStorage.getItem('pw-' + t) === val('pass')) go('apply'); else document.getElementById('wrong').hidden = false;
+  };
+} else if (step === 'forgot') {
+  main.innerHTML = `
+    <h1>Reset your password</h1>
+    <p>Enter your email and we'll send you a link to reset your password.</p>
+    <form onsubmit="return false">
+      <label for="addr">Email address</label><input id="addr" type="email">
+      <button type="submit" id="send">Send reset link</button>
+    </form>`;
+  document.getElementById('send').onclick = () => {
+    if (!val('addr')) return;
+    sessionStorage.setItem('resetAsked-' + t, val('addr'));
+    main.innerHTML = '<h1>Check your email</h1><p>We sent you a link to reset your password.</p>';
+  };
+} else if (step === 'reset') {
+  main.innerHTML = `
+    <h1>Choose a new password</h1>
+    <form onsubmit="return false">
+      <label for="np">New password</label><input id="np" type="password">
+      <label for="np2">Confirm new password</label><input id="np2" type="password">
+      <button type="submit" id="save">Save password</button>
+    </form>`;
+  document.getElementById('save').onclick = () => {
+    if (!val('np') || val('np') !== val('np2')) return;
+    localStorage.setItem('pw-' + t, val('np'));
+    main.innerHTML = '<h1>Your password was changed</h1><a href="?step=login">Sign in</a>';
+  };
+} else if (step === 'apply') {
+  main.innerHTML = `
+    <h1>Software Engineer: your application</h1>
+    <form onsubmit="return false">
+      <div class="field"><label for="why">Why Initech?</label><textarea id="why"></textarea></div>
+      <button type="submit" id="submit">Submit application</button>
+    </form>`;
+}
+</script>
+</body></html>

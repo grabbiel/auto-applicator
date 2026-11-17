@@ -41,7 +41,7 @@ public final class Memory: @unchecked Sendable {
 
     /// The user's own answer to an almost identically worded question, fitted to this field's options.
     public func similarAnswer(for f: FieldSpec) -> String? {
-        let label = norm(f.label)
+        let label = norm(f.contextLabel)
         guard label.count >= 8 else { return nil }
         lock.lock()
         let candidates = entries.filter { $0.answer != nil }

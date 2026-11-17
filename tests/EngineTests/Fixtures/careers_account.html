@@ -1,0 +1,81 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Applying to Software Engineer</title>
+<style>.field { margin: 8px 0; } .hidden-file { position: absolute; left: -9999px; }</style></head>
+<body>
+<!-- Modelled on Avature (Intuit): a sign-in box next to "First time here?" with a resume upload; a sign-up page that is
+     also the first page of the application (password, consent, talent-community and text-message choices); then an
+     emailed code; then the last page. The step is in the address (?step=…). -->
+<main id="main"></main>
+<script>
+const step = new URLSearchParams(location.search).get('step') || 'login';
+const main = document.getElementById('main');
+const go = s => { location.search = '?step=' + s; };
+if (step === 'login') {
+  main.innerHTML = `
+    <h1>Software Engineer</h1>
+    <section><h3>Already registered?</h3>
+      <form id="login" onsubmit="return false">
+        <label for="username">Username</label><input id="username" name="username" class="loginInput">
+        <label for="password">Password</label><input id="password" type="password" name="password" class="loginInput">
+        <button id="login-btn" type="submit">Log in</button>
+        <a id="forgotPassword" href="#">Forgot your password?</a>
+      </form>
+    </section>
+    <section><h3>First time here?</h3>
+      <a id="methodButton--later" href="#">Without Resume</a>
+      <a id="methodButton--file" href="#" onclick="document.getElementById('resumeFile').click(); return false">My Computer</a>
+      <label for="resumeFile" class="hidden-file">My Computer *</label><input type="file" id="resumeFile" name="resumeFile" class="hidden-file">
+    </section>`;
+  document.getElementById('login-btn').onclick = () => { window.__loginTried = true; };
+  document.getElementById('resumeFile').onchange = () => setTimeout(() => go('register'), 200);
+} else if (step === 'register') {
+  main.innerHTML = `
+    <h1>Software Engineer</h1>
+    <form id="reg" onsubmit="return false">
+      <h3>Personal information</h3>
+      <div class="field"><label for="5032">Preferred first name *</label><input id="5032" required></div>
+      <div class="field"><label for="5033">Last name *</label><input id="5033" required></div>
+      <div class="field"><label for="5034">Email *</label><input id="5034" type="email" required></div>
+      <h3>Education</h3>
+      <div class="field"><label for="ed-end">End date year</label><input id="ed-end"></div>
+      <h3>Set your password</h3>
+      <div class="field"><label for="5045">Password *</label><input id="5045" type="password" required></div>
+      <div class="field"><label for="5046">Password confirmation *</label><input id="5046" type="password" required></div>
+      <fieldset class="field"><legend>Join Initech's Talent Community *</legend>
+        <input type="radio" name="5048" id="5048_7" value="7"><label for="5048_7">Yes</label>
+        <input type="radio" name="5048" id="5048_8" value="8"><label for="5048_8">No</label></fieldset>
+      <fieldset class="field"><legend>Text Message Consent *</legend>
+        <input type="radio" name="5050" id="5050_7" value="7"><label for="5050_7">Yes</label>
+        <input type="radio" name="5050" id="5050_8" value="8"><label for="5050_8">No</label></fieldset>
+      <div class="field"><input type="checkbox" id="5051" required><label for="5051">By submitting this form, you acknowledge that Initech may use your personal information as described in the Privacy Policy *</label></div>
+      <button type="submit" id="next" name="next">Next</button>
+    </form>`;
+  document.getElementById('next').onclick = () => {
+    const v = id => document.getElementById(id).value;
+    const ok = v('5032') && v('5034') && v('5045') && v('5045') === v('5046') && document.getElementById('5051').checked;
+    sessionStorage.setItem('reg', JSON.stringify({pw: v('5045'), confirm: v('5046'), email: v('5034'), year: v('ed-end'),
+      community: document.getElementById('5048_8').checked ? 'No' : (document.getElementById('5048_7').checked ? 'Yes' : ''),
+      texts: document.getElementById('5050_8').checked ? 'No' : (document.getElementById('5050_7').checked ? 'Yes' : ''),
+      consent: document.getElementById('5051').checked}));
+    if (ok) go('code');
+  };
+} else if (step === 'code') {
+  main.innerHTML = `
+    <h1>Verify your email address</h1>
+    <p>We've sent a verification code to your email. Please enter it below.</p>
+    <form onsubmit="return false">
+      <label for="otp">Enter verification code (e.g. 123456) *</label><input id="otp" autocomplete="one-time-code" required>
+      <button type="submit" id="verify">Verify</button>
+    </form>`;
+  document.getElementById('verify').onclick = () => { if (document.getElementById('otp').value === '482913') go('final'); };
+} else if (step === 'final') {
+  main.innerHTML = `
+    <h1>Review your application</h1>
+    <form onsubmit="return false">
+      <div class="field"><label for="why">Why Initech?</label><textarea id="why"></textarea></div>
+      <button type="submit" id="send">Submit</button>
+    </form>`;
+  document.getElementById('send').onclick = () => { window.__sent = true; main.innerHTML = '<h1>Thank you for applying!</h1>'; };
+}
+</script>
+</body></html>

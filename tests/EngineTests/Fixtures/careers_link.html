@@ -1,0 +1,26 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Software Engineer 1 | Careers</title>
+<style>.phs-cookie-popup-area { position: sticky; top: 0; background: #eee; padding: 12px; }</style></head>
+<body>
+<!-- Modelled on U.S. Bank's careers site (Phenom): a cookie strip on top, "Apply now" links that open the application
+     on another site in a new tab, two "Save job" boxes and a chat box (none of them an application form). -->
+<div class="phs-cookie-popup-area" role="region" aria-label="cookies message">
+  Tell us whether you accept cookies. We use cookies to collect information about how you use this site.
+  <a href="https://example.com/cookies">Cookie Policy</a>
+  <button id="decline">Decline optional Cookies</button><button id="accept">Accept optional Cookies</button>
+</div>
+<main>
+  <h1>Software Engineer 1 (Java, Spring Boot, APIs)</h1>
+  <a class="btn" href="generic_form.html" target="_blank">Apply now</a>
+  <input type="checkbox" id="save-UBNA1"><label for="save-UBNA1">Save</label>
+  <input type="checkbox" id="saveJob-UBNA1"><label for="saveJob-UBNA1">Save job</label>
+  <p>Job description. Java, Spring Boot.</p>
+  <a class="btn" href="generic_form.html" target="_blank">Apply now</a>
+</main>
+<div><input id="PhenomChatbotFooterInput" placeholder="Ask anything"></div>
+<script>
+  window.__consent = '';
+  document.getElementById('decline').onclick = () => { window.__consent = 'declined'; document.querySelector('.phs-cookie-popup-area').remove(); };
+  document.getElementById('accept').onclick = () => { window.__consent = 'accepted'; document.querySelector('.phs-cookie-popup-area').remove(); };
+</script>
+</body></html>

@@ -6,6 +6,7 @@ struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @State private var confirmForget = false
     @State private var showPassword = false
+    @State private var accounts: [Database.Account] = []
 
     var body: some View {
         @Bindable var model = model
@@ -52,7 +53,9 @@ struct SettingsView: View {
             card("Email codes", "envelope.badge") { EmailSetupView() }
 
             card("Company-site accounts", "key") {
-                Text("Some company sites (like Workday) make you create an account to apply. It uses this password for those accounts, so you can sign in to them yourself later.")
+                Text("Some company sites (like Workday) make you create an account to apply. The app uses this one password on all of them. "
+                     + "New accounts get it. When a site already has an account for your email with another password, the app resets that "
+                     + "password to this one, using the reset email the site sends you. Use it to sign in to those sites yourself.")
                     .font(Typo.small).foregroundStyle(Palette.textSoft).fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
                     Text(showPassword ? model.secrets.portalPassword : String(repeating: "•", count: 16))
@@ -68,7 +71,15 @@ struct SettingsView: View {
                     }
                     .buttonStyle(SecondaryButtonStyle())
                 }
+                if !accounts.isEmpty {
+                    Divider().overlay(Palette.line)
+                    Text("Sites this password opens").font(Typo.label)
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(accounts) { AccountRow(account: $0) }
+                    }
+                }
             }
+            .onAppear { accounts = model.db.accounts() }
 
             card("Your data", "externaldrive") {
                 Text(model.usesCloud
@@ -218,11 +229,13 @@ struct LinkedInStatusView: View {
             VStack(alignment: .leading, spacing: 2) {
                 switch model.linkedInState {
                 case .signedIn:
-                    Text("Signed in").font(Typo.bodyStrong)
+                    Text(model.usesCloud ? "Signed in (in the cloud browser)" : "Signed in").font(Typo.bodyStrong)
                     Text("It searches and applies as you.").font(Typo.small).foregroundStyle(Palette.textSoft)
                 case .signedOut:
                     Text("Not signed in").font(Typo.bodyStrong)
-                    Text("Sign in once. You type your password on LinkedIn's own page; the app never sees it.")
+                    Text(model.usesCloud
+                         ? "Sign in once, inside the cloud browser: LinkedIn's own page opens here and you type in it as usual."
+                         : "Sign in once. You type your password on LinkedIn's own page; the app never sees it.")
                         .font(Typo.small).foregroundStyle(Palette.textSoft).fixedSize(horizontal: false, vertical: true)
                 case .unknown:
                     Text("Checking…").font(Typo.bodyStrong)
@@ -230,7 +243,8 @@ struct LinkedInStatusView: View {
             }
             Spacer()
             if model.linkedInState == .signedIn {
-                Button("Sign out") { Task { await model.signOutOfLinkedIn() } }.buttonStyle(SecondaryButtonStyle()).disabled(model.isRunning)
+                Button("Sign out") { Task { await model.signOutOfLinkedIn() } }.buttonStyle(SecondaryButtonStyle())
+                    .disabled(model.isRunning || model.cloudBusy != nil)
             } else {
                 Button("Sign in to LinkedIn") { model.showSignIn = true }.buttonStyle(PrimaryButtonStyle()).disabled(model.isRunning)
             }
@@ -287,6 +301,41 @@ struct EmailSetupView: View {
                         .font(Typo.small).foregroundStyle(test.ok ? Palette.greenDeep : Palette.red).lineLimit(3)
                 }
             }
+        }
+    }
+}
+
+/// A careers site with an account for the person's email, and what the app did there.
+private struct AccountRow: View {
+    let account: Database.Account
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: symbol).font(.system(size: 11, weight: .semibold)).foregroundStyle(tint).frame(width: 14)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(account.host).font(Typo.body).textSelection(.enabled)
+                Text(detail).font(Typo.small).foregroundStyle(Palette.textSoft)
+            }
+            Spacer()
+        }
+    }
+
+    private var symbol: String {
+        switch account.how {
+        case .made: "person.badge.plus"
+        case .signedIn: "checkmark"
+        case .reset: "arrow.triangle.2.circlepath"
+        }
+    }
+
+    private var tint: Color { account.how == .reset ? Palette.amber : Palette.green }
+
+    private var detail: String {
+        let when = account.date.map { " on " + $0.formatted(date: .abbreviated, time: .omitted) } ?? ""
+        switch account.how {
+        case .made: return "The app made this account\(when)."
+        case .signedIn: return "Already had this password; the app signed in\(when)."
+        case .reset: return "Had another password; the app reset it to this one\(when). The old password no longer works there."
         }
     }
 }

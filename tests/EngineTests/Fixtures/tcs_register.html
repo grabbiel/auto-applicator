@@ -1,0 +1,101 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Registration form</title>
+<style>
+  mat-form-field { display: block; position: relative; margin: 10px 0; width: 380px; }
+  .mat-mdc-select { display: block; border-bottom: 1px solid #888; height: 28px; cursor: pointer; }
+  .mat-mdc-select-placeholder { color: #888; }
+  [role=listbox] { position: absolute; z-index: 5; background: #fff; border: 1px solid #ccc; max-height: 220px; overflow: auto; width: 380px; }
+  mat-option { display: block; padding: 6px 10px; cursor: pointer; }
+  .chips { display: flex; gap: 6px; margin: 4px 0; }
+  mat-chip-row { background: #e0e0e0; border-radius: 12px; padding: 2px 10px; }
+</style></head>
+<body>
+<!-- Modelled on TCS iBegin's US registration (Angular Material, 2026): mat-selects whose empty state shows "Select
+     Title" and whose list opens in a popover panel (aria-controls → role=listbox, mat-option role=option); a timezone
+     list of ~400 zones; a Skills box that says it's a combobox only while focused (its class always does), fetches
+     suggestions as you type, and turns each picked one into a chip below it (Maximum 5); an optional "M.I.". -->
+<form id="reg" onsubmit="return false">
+  <h3>Candidate Details</h3>
+  <mat-form-field><label id="l-title" for="title">Title<span>*</span></label>
+    <mat-select id="title" role="combobox" class="mat-mdc-select mat-mdc-select-required mat-mdc-select-empty" tabindex="0"
+      aria-labelledby="l-title" aria-required="true" aria-haspopup="listbox" aria-controls="title-panel"><span class="mat-mdc-select-placeholder">Select Title</span></mat-select>
+  </mat-form-field>
+  <mat-form-field><label for="first">First Name*</label><input id="first" required class="mat-mdc-input-element"></mat-form-field>
+  <mat-form-field><label for="mi">M.I.</label><input id="mi" class="mat-mdc-input-element" placeholder="M.I."></mat-form-field>
+  <mat-form-field><label for="last">Last Name*</label><input id="last" required class="mat-mdc-input-element"></mat-form-field>
+  <div>
+    <mat-form-field><label id="skills-input-label" for="skills">Skills<span>*</span></label>
+      <input id="skills" type="text" maxlength="50" autocomplete="off" aria-label="Skills" aria-required="true"
+        class="mat-mdc-input-element mat-mdc-autocomplete-trigger" placeholder="Enter your skills in order of expertise (Maximum 5)">
+    </mat-form-field>
+  </div>
+  <div class="chips" id="chips"></div>
+  <mat-form-field><label id="l-tz" for="tz">Preferred Timezone<span>*</span></label>
+    <mat-select id="tz" role="combobox" class="mat-mdc-select mat-mdc-select-required mat-mdc-select-empty" tabindex="0"
+      aria-labelledby="l-tz" aria-required="true" aria-haspopup="listbox" aria-controls="tz-panel"><span class="mat-mdc-select-placeholder">Select your preferred timezone</span></mat-select>
+  </mat-form-field>
+  <button type="submit" id="next">Next</button>
+</form>
+<script>
+const zones = (Intl.supportedValuesOf ? Intl.supportedValuesOf('timeZone') : ['America/Chicago', 'America/New_York'])
+  .concat(['US/Central', 'US/Eastern', 'US/Pacific', 'CST', 'EST', 'UTC']);
+const lists = { title: ['Dr.', 'Mr.', 'Ms.'], tz: zones };
+const value = { title: '', tz: '' };
+const close = () => document.querySelectorAll('[role=listbox]').forEach(p => p.remove());
+for (const id of ['title', 'tz']) {
+  const sel = document.getElementById(id);
+  sel.addEventListener('click', () => {
+    close();
+    const panel = document.createElement('div');
+    panel.id = id + '-panel'; panel.setAttribute('role', 'listbox');
+    lists[id].forEach((o, i) => {
+      const opt = document.createElement('mat-option');
+      opt.setAttribute('role', 'option'); opt.id = `${id}-opt-${i}`; opt.textContent = o;
+      opt.addEventListener('click', () => {
+        value[id] = o; sel.textContent = o; sel.classList.remove('mat-mdc-select-empty'); close();
+      });
+      panel.appendChild(opt);
+    });
+    sel.closest('mat-form-field').appendChild(panel);
+    sel.setAttribute('aria-expanded', 'true');
+  });
+  sel.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
+const known = ['Core JAVA', 'Java', 'Javascript', 'Python', 'Python Scripting', 'SQL', 'SQL Server', 'PostgreSQL', 'AWS', 'AWS Lambda',
+  'Docker', 'Kubernetes', 'FastAPI', 'Golang', 'Google Cloud', 'C++', 'C#', 'Raleigh, North Carolina'];
+const skills = [];
+const box = document.getElementById('skills');
+box.addEventListener('focus', () => { box.setAttribute('role', 'combobox'); box.setAttribute('aria-autocomplete', 'list'); });
+let timer;
+box.addEventListener('input', () => {
+  clearTimeout(timer);
+  close();
+  const q = box.value.trim().toLowerCase();
+  if (!q) return;
+  timer = setTimeout(() => {   // the server's suggestions
+    const hits = known.filter(k => k.toLowerCase().includes(q)).slice(0, 8);
+    const panel = document.createElement('div');
+    panel.id = 'mat-autocomplete-0'; panel.setAttribute('role', 'listbox');
+    hits.forEach(h => {
+      const opt = document.createElement('mat-option');
+      opt.setAttribute('role', 'option'); opt.textContent = h;
+      opt.addEventListener('click', () => {
+        if (skills.length < 5 && !skills.includes(h)) skills.push(h);
+        document.getElementById('chips').innerHTML = skills.map(s => `<mat-chip-row>${s}</mat-chip-row>`).join('');
+        box.value = ''; close(); box.removeAttribute('aria-controls');
+      });
+      panel.appendChild(opt);
+    });
+    box.closest('mat-form-field').appendChild(panel);
+    box.setAttribute('aria-controls', 'mat-autocomplete-0');
+  }, 500);
+});
+document.getElementById('next').addEventListener('click', () => {
+  window.__result = { title: value.title, tz: value.tz, skills: skills.slice(), mi: document.getElementById('mi').value, typed: box.value };
+  sessionStorage.setItem('tcsResult', JSON.stringify(window.__result));
+  if (value.title && value.tz && skills.length && document.getElementById('first').value)
+    document.body.innerHTML = '<h3>Review your profile</h3><button type="button" id="submit">Submit</button>';
+});
+</script>
+</body></html>

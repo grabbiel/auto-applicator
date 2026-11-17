@@ -74,7 +74,7 @@ extension AppModel {
         show("Signed out of the cloud browser.")
     }
 
-    /// Starts Chrome in the cloud, opens LinkedIn with this Mac's sign-in, and reports what it saw.
+    /// Starts Chrome in the cloud, opens LinkedIn with the sign-in made there, and reports what it saw.
     func testCloud() async {
         guard let account = cloudAccount else { return }
         cloudBusy = "Starting Chrome in the cloud…"
@@ -86,27 +86,62 @@ extension AppModel {
             let ready = Date().timeIntervalSince(started)
             let agent = WebAgent(cloud: cloud)
             cloudBusy = "Opening LinkedIn…"
-            await cloud.setCookies(await WebAgent.storedCookies(for: "linkedin.com"))
             let recognized = await agent.linkedInSignedIn()
             let image = await agent.snapshot()
-            await cloud.stop(saveProfile: false)
+            await cloud.stop(saveProfile: recognized)
             agent.close()
+            settings.cloudLinkedIn = recognized
             let start = "Working: Chrome started in \(String(format: "%.1f", ready)) s"
-            cloudTest = CloudTest(ok: true, message: recognized ? "\(start) and LinkedIn recognized you." : "\(start). LinkedIn wants you to sign in (Settings › LinkedIn) before a run.", image: image)
+            cloudTest = CloudTest(ok: true, message: recognized ? "\(start) and LinkedIn recognized you." : "\(start). Sign in to LinkedIn in it (Settings › LinkedIn) before a run.", image: image)
         } catch {
             cloudTest = CloudTest(ok: false, message: error.localizedDescription, image: nil)
         }
     }
 
-    /// The browser a run uses: Chrome in the cloud when that's on (carrying over this Mac's LinkedIn sign-in), else
-    /// the built-in one.
+    /// The browser a run uses: Chrome in the cloud when that's on (with the LinkedIn sign-in made inside it; one copied
+    /// from this Mac gets ended by LinkedIn once it shows up far away), else the built-in one.
     func makeRunBrowser() async throws -> WebAgent {
         guard usesCloud, let account = cloudAccount else { return web }
         runPhase = "Starting Chrome in the cloud"
         let minutes = Double(settings.limits.maxAppliesPerRun) * 6
         let cloud = try await CloudBrowser.start(account: account, timeout: min(8 * 3600, max(3600, minutes * 60)))
-        await cloud.setCookies(await WebAgent.storedCookies(for: "linkedin.com"))
         return WebAgent(cloud: cloud)
+    }
+
+    /// Starts the cloud browser for signing in to LinkedIn inside it, without an old LinkedIn sign-in.
+    func startCloudLinkedInSignIn() async throws -> CloudBrowser {
+        guard let account = cloudAccount else { throw BrowserError("The cloud browser isn't set up.") }
+        let cloud = try await CloudBrowser.start(account: account, timeout: 1800)
+        signInCloud = cloud
+        await cloud.clearCookies(domain: "linkedin.com")
+        return cloud
+    }
+
+    /// Ends the sign-in session; with `signedIn`, keeps its cookies for runs.
+    func finishCloudLinkedInSignIn(_ cloud: CloudBrowser, signedIn: Bool) async {
+        if signInCloud === cloud { signInCloud = nil }
+        await cloud.stopScreencast()
+        await cloud.stop(saveProfile: signedIn)
+        if signedIn {
+            settings.cloudLinkedIn = true
+            show("Signed in to LinkedIn in the cloud browser.")
+        }
+    }
+
+    /// Removes the LinkedIn sign-in from the cloud browser.
+    func signOutOfCloudLinkedIn() async {
+        guard let account = cloudAccount else { return }
+        cloudBusy = "Signing out of LinkedIn…"
+        defer { cloudBusy = nil }
+        do {
+            let cloud = try await CloudBrowser.start(account: account, timeout: 900)
+            await cloud.clearCookies(domain: "linkedin.com")
+            await cloud.stop(saveProfile: true)
+            settings.cloudLinkedIn = false
+            show("Signed out of LinkedIn.")
+        } catch {
+            show(error.localizedDescription)
+        }
     }
 }
 

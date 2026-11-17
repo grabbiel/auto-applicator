@@ -1,0 +1,67 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Application</title>
+<style>
+  .modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.4); }
+  .modal.show { display: block; }
+  .modal-dialog { margin: 60px auto; width: 480px; background: #fff; padding: 16px; }
+  .close { width: 0; padding: 0; border: 0; }
+  [role=listbox] { border: 1px solid #ccc; }
+</style></head>
+<body>
+<!-- Modelled on Infosys: after the resume goes up, a popup offers to import what it read from the resume. It keeps the
+     keyboard to itself while open; the school is a box searched by typing, on the next page. -->
+<form id="f" onsubmit="return false">
+  <section id="p1">
+    <h2>Personal info</h2>
+    <label for="first">First name</label><input id="first" name="first">
+    <label for="city">City</label><input id="city" name="city">
+    <label for="resume">Upload file (doc, pdf)</label><input type="file" id="resume" name="resume" accept=".pdf,.doc">
+    <button type="button" id="next">Next</button>
+  </section>
+  <section id="p2" hidden>
+    <h2>Education</h2>
+    <label for="school"><span>*</span>School / education institution</label>
+    <input id="school" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="schools" autocomplete="off" required>
+    <ul id="schools" role="listbox" hidden></ul>
+    <button type="button" id="send">Submit application</button>
+  </section>
+</form>
+<div class="modal" id="modal" tabindex="-1">
+  <div class="modal-dialog" role="dialog">
+    <div class="modal-header"><div class="close-item"><button type="button" class="close" data-dismiss="modal" aria-label="Close"><span class="x-icon"></span></button></div>
+      <p>Extracting information from the Resume</p>
+      <p>If you prefer to attach your resume and manually fill out the application fields, please close this popup window.</p>
+      <div>3 fields extracted</div></div>
+    <div class="modal-body"><p>First name: Jane</p><p>City: Lima</p><p>School: Old School</p>
+      <button class="save-button" id="import">Import fields</button></div>
+  </div>
+</div>
+<script>
+  const modal = document.getElementById('modal');
+  const open = () => modal.classList.contains('show');
+  document.getElementById('resume').addEventListener('change', () => setTimeout(() => modal.classList.add('show'), 200));
+  document.querySelector('[data-dismiss=modal]').addEventListener('click', () => modal.classList.remove('show'));
+  document.getElementById('import').addEventListener('click', () => {
+    window.__imported = true; document.getElementById('city').value = 'Lima'; modal.classList.remove('show');
+  });
+  // Like Bootstrap's modal: focus that leaves the popup is pulled back into it.
+  document.addEventListener('focusin', e => { if (open() && !modal.contains(e.target)) modal.focus(); });
+  document.getElementById('next').addEventListener('click', () => {
+    document.getElementById('p1').hidden = true; document.getElementById('p2').hidden = false;
+  });
+  const schools = ['University of Texas at Austin', 'University of Texas at Dallas', 'Texas A&M University', 'Nevada State University'];
+  const box = document.getElementById('school'), list = document.getElementById('schools');
+  box.addEventListener('input', () => setTimeout(() => {
+    if (document.activeElement !== box) return;  // typed by script into a box without the keyboard: nothing to search
+    const q = box.value.toLowerCase();
+    const hits = schools.filter(s => q && s.toLowerCase().includes(q.slice(0, 8)));
+    list.innerHTML = hits.map(s => '<li role="option">' + s + '</li>').join('');
+    list.hidden = !hits.length; box.setAttribute('aria-expanded', String(!!hits.length));
+  }, 250));
+  list.addEventListener('mousedown', e => {
+    const li = e.target.closest('[role=option]'); if (!li) return;
+    e.preventDefault(); box.value = li.textContent; window.__school = li.textContent; list.hidden = true;
+  });
+  document.getElementById('send').addEventListener('click', () => { window.__sent = true; });
+</script>
+</body></html>

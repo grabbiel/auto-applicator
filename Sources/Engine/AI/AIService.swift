@@ -82,9 +82,10 @@ public final class AIService: FormAnswering, @unchecked Sendable {
                 answerSchema = .choice(options)
             }
             props.append((key, .object([("evidence", .string), ("answer", answerSchema), ("confidence", .choice(["high", "medium", "low"]))])))
-            var line = "\(key): \"\(f.label.trimmed)\" (\(f.type.rawValue)\(f.required ? ", required" : ""))"
+            var line = "\(key): \"\(f.contextLabel.trimmed)\" (\(f.type.rawValue)\(f.required ? ", required" : ""))"
             if !options.isEmpty { line += " options: " + options.map { "\"\($0)\"" }.joined(separator: ", ") }
             if let max = f.maxLength { line += " max \(max) characters" }
+            if f.maxChoices > 1 { line += " several answers allowed: up to \(f.maxChoices), separated by \"; \"" }
             if !f.placeholder.isEmpty && f.placeholder != f.label { line += " placeholder: \"\(f.placeholder)\"" }
             if let error = feedback[f.id], !error.isEmpty { line += "\n  The form rejected the last answer: \"\(error)\" — fix it." }
             lines.append(line)

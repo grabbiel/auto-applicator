@@ -143,7 +143,17 @@ private struct JobRow: View {
                         .buttonStyle(SecondaryButtonStyle())
                 }
                 if job.status == .needsAnswer {
-                    Button("Answer its questions") { model.page = .inbox }.buttonStyle(PrimaryButtonStyle())
+                    if model.pending.contains(where: { $0.jobIDs.contains(job.id) }) {
+                        Button("Answer its questions") { model.page = .inbox }.buttonStyle(PrimaryButtonStyle())
+                    } else {
+                        Label("Answered. The next run finishes it first.", systemImage: "checkmark.circle")
+                            .font(Typo.small).foregroundStyle(Palette.greenDeep)
+                    }
+                }
+                if job.status?.isFailure == true && job.attempts >= model.settings.limits.maxAttemptsPerJob {
+                    Button("Try again next run") { model.retryJob(job) }
+                        .buttonStyle(SecondaryButtonStyle())
+                        .help("It stopped trying after \(job.attempts) attempts. This lets the next run try it again.")
                 }
                 Spacer()
                 Button("Remove") { model.removeJob(job) }

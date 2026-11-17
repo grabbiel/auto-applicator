@@ -88,7 +88,7 @@ struct SignInSheet: View {
             if let url = web.url, url.host?.hasSuffix("linkedin.com") == true,
                !["/login", "/checkpoint", "/uas", "/authwall"].contains(where: { url.path.hasPrefix($0) }),
                await web.cookies(for: "linkedin.com").contains(where: { $0.name == "li_at" }) {
-                model.linkedInState = .signedIn
+                model.localLinkedIn = .signedIn
                 model.show("Signed in to LinkedIn.")
                 dismiss()
                 return

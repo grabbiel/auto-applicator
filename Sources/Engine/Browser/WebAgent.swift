@@ -112,6 +112,8 @@ public final class WebAgent: NSObject, WKNavigationDelegate, WKUIDelegate {
         lastNavigationError = nil
         if let cloud {
             lastNavigationError = try await cloud.navigate(url)
+        } else if url.isFileURL {
+            webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
         } else {
             webView.load(URLRequest(url: url))
         }
@@ -124,8 +126,12 @@ public final class WebAgent: NSObject, WKNavigationDelegate, WKUIDelegate {
         try await sleep(0.3)
         while Date() < deadline {
             try Task.checkCancellation()
-            if let state = try? await js("return document.readyState") as? String, state != "loading", url != nil {
-                if !isLoading || state == "complete" || Date().addingTimeInterval(timeout - 8) > deadline { return }
+            // "complete|about:blank" is the empty page a new browser starts on, before the real one arrives.
+            if let r = try? await js("return document.readyState + '|' + location.href") as? String, let url {
+                let parts = r.split(separator: "|", maxSplits: 1).map(String.init)
+                let state = parts.first ?? "", href = parts.count > 1 ? parts[1] : ""
+                let blank = href == "about:blank" && url.absoluteString != "about:blank"
+                if state != "loading", !blank, !isLoading || state == "complete" || Date().addingTimeInterval(timeout - 8) > deadline { return }
             }
             try await sleep(0.25)
         }
@@ -203,7 +209,7 @@ public final class WebAgent: NSObject, WKNavigationDelegate, WKUIDelegate {
     public func js(_ body: String, _ args: [String: Any] = [:], world: WKContentWorld? = nil) async throws -> Any? {
         if let cloud { return try await cloud.run(body, args, pageWorld: world == .page) }
         let world = world ?? .defaultClient
-        let wrapped = "const __r = await (async () => { \(body) })(); return __r === undefined ? null : __r;"
+        let wrapped = Scripts.deepDocument + "\nconst __r = await (async () => { \(body) })(); return __r === undefined ? null : __r;"
         let result: Any = try await withCheckedThrowingContinuation { cont in
             webView.callAsyncJavaScript(wrapped, arguments: args, in: nil, in: world) { result in
                 switch result {
@@ -244,28 +250,68 @@ public final class WebAgent: NSObject, WKNavigationDelegate, WKUIDelegate {
         return false
     }
 
+    /// The page's visible text, starting with what's drawn inside open shadow roots (such as LinkedIn's Easy Apply
+    /// window), which the body's text leaves out.
     public func text(maxChars: Int = 6000) async -> String {
-        String(await string("return document.body ? document.body.innerText : ''").prefix(maxChars))
+        String(await string(#"""
+            const parts = [];
+            const walk = node => {
+              for (const el of node.querySelectorAll('*')) {
+                if (!el.shadowRoot) continue;
+                for (const c of el.shadowRoot.children) {
+                  if (/^(style|script|link|template|svg)$/i.test(c.tagName) || !c.getClientRects().length || getComputedStyle(c).visibility === 'hidden') continue;
+                  const t = (c.innerText || '').trim();
+                  if (t) parts.push(t);
+                }
+                walk(el.shadowRoot);
+              }
+            };
+            walk(window.document);
+            const body = window.document.body ? window.document.body.innerText : '';
+            return parts.length ? parts.join('\n') + '\n' + body : body;
+            """#).prefix(maxChars))
     }
 
     // MARK: input
 
     /// The center of the first visible element matching `selector`, scrolled into view, in view coordinates
-    /// (top-left origin), and whether something else covers that point.
+    /// (top-left origin), and whether something else covers that point. A checkbox or radio the page draws itself
+    /// (the real box zero-size or transparent, as on Oracle's career sites) is aimed at where it's drawn: a small box
+    /// inside its label, else the label's left edge. `document.__aaAim` remembers what the click is aimed at.
     private func target(_ selector: String) async -> (CGPoint, covered: Bool)? {
         let r = try? await js(Scripts.prelude + """
+            document.__aaAim = null;
             let el = null;
             try { el = [...document.querySelectorAll(sel)].find(shown) || document.querySelector(sel); } catch (e) { return null; }
             if (!el) return null;
-            el.scrollIntoView({block: 'center', inline: 'center', behavior: 'instant'});
-            await new Promise(r => setTimeout(r, 40));
-            const b = el.getBoundingClientRect();
-            if (b.width <= 0 || b.height <= 0) return null;
-            const x = b.left + Math.min(b.width / 2, 40), y = b.top + b.height / 2;
-            const hit = document.elementFromPoint(x, y);
             const label = el.labels && el.labels[0];
-            const ok = hit && (hit === el || el.contains(hit) || hit.contains(el) || (label && (label === hit || label.contains(hit))));
-            return {x, y, covered: !ok};
+            let aim = el;
+            if (el.tagName === 'INPUT' && /^(checkbox|radio)$/.test(el.type) && label) {
+              const r0 = el.getBoundingClientRect();
+              if (r0.width < 4 || r0.height < 4 || getComputedStyle(el).opacity === '0') {
+                const box = [...label.querySelectorAll('*')].find(c => {
+                  if (c === el || c.closest('a, button')) return false;
+                  const b = c.getBoundingClientRect();
+                  return b.width >= 8 && b.height >= 8 && b.width <= 48 && b.height <= 48 && Math.abs(b.width - b.height) <= 8;
+                });
+                aim = box || label;
+              }
+            }
+            // A choice in an open list only as far as needed: a list that draws only the rows in view redraws them when
+            // it scrolls, and the tagged row would be gone.
+            const nearest = el.hasAttribute('data-auto-choice');
+            aim.scrollIntoView({block: nearest ? 'nearest' : 'center', inline: nearest ? 'nearest' : 'center', behavior: 'instant'});
+            await new Promise(r => setTimeout(r, 40));
+            const b = aim.getBoundingClientRect();
+            if (b.width <= 0 || b.height <= 0) return null;
+            document.__aaAim = aim;
+            const x = b.left + Math.min(b.width / 2, aim === label && aim !== el ? 10 : 40), y = b.top + b.height / 2;
+            const hit = document.elementFromPoint(x, y);
+            const ok = hit && (hit === aim || aim.contains(hit) || hit.contains(aim) || hit === el || (label && (label === hit || label.contains(hit))));
+            // Inside a frame (see Scripts.deepDocument): where the frame sits on the page.
+            const o = __aaFrame ? __aaFrame.getBoundingClientRect() : {left: 0, top: 0};
+            const ox = __aaFrame ? o.left + __aaFrame.clientLeft : 0, oy = __aaFrame ? o.top + __aaFrame.clientTop : 0;
+            return {x: x + ox, y: y + oy, covered: !ok};
             """, ["sel": selector]) as? [String: Any]
         guard let r, let x = (r["x"] as? NSNumber)?.doubleValue, let y = (r["y"] as? NSNumber)?.doubleValue else { return nil }
         return (CGPoint(x: x, y: y), (r["covered"] as? Bool) ?? false)
@@ -291,9 +337,10 @@ public final class WebAgent: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// when the element is covered or the click didn't land.
     @discardableResult
     public func click(_ selector: String) async -> Bool {
-        guard let (p, covered) = await target(selector) else { return false }
-        if !covered, cloud != nil || webView.window != nil {
-            await bool("try { const el = document.querySelector(sel); if (el) el.__aaClicked = false; " +
+        // Without a point to press (a zero-size element), the script click below still works.
+        if let (p, covered) = await target(selector), !covered, cloud != nil || webView.window != nil {
+            let aimed = "(document.__aaAim && document.__aaAim.isConnected ? document.__aaAim : document.querySelector(sel))"
+            await bool("try { const el = \(aimed); if (el) el.__aaClicked = false; " +
                        "if (el) el.addEventListener('click', e => { el.__aaClicked = true; }, {once: true, capture: true}); return true; } catch (e) { return false; }",
                        ["sel": selector])
             if let cloud {
@@ -305,12 +352,19 @@ public final class WebAgent: NSObject, WKNavigationDelegate, WKUIDelegate {
                 mouse(.leftMouseUp, at: wp)
             }
             try? await sleep(0.05)
-            if await bool("try { const el = document.querySelector(sel); return !el || !el.isConnected || el.__aaClicked !== false; } catch (e) { return true; }",
+            if await bool("try { const el = \(aimed); return !el || !el.isConnected || el.__aaClicked !== false; } catch (e) { return true; }",
                           ["sel": selector]) {
                 return true
             }
         }
-        return await bool("""
+        return await scriptClick(selector)
+    }
+
+    /// A click sent to the element by script: no mouse moves and the focus stays where it is (a list that closes when
+    /// its box loses the focus keeps its choices).
+    @discardableResult
+    public func scriptClick(_ selector: String) async -> Bool {
+        await bool("""
             let el = null; try { el = document.querySelector(sel); } catch (e) {}
             if (!el) return false;
             const target = (el.tagName === 'INPUT' && el.labels && el.labels[0] && getComputedStyle(el).opacity === '0') ? el.labels[0] : el;
@@ -360,6 +414,32 @@ public final class WebAgent: NSObject, WKNavigationDelegate, WKUIDelegate {
             for (const t of ['keydown', 'keyup']) el.dispatchEvent(new KeyboardEvent(t, {key: k, code: k, bubbles: true, cancelable: true}));
             return true;
             """, ["k": key.domName])
+    }
+
+    /// Types text where the focus is, one character at a time as a keyboard does (for boxes that take one character
+    /// each and move on to the next as you type). False when there's no keyboard to type with.
+    @discardableResult
+    public func typeKeys(_ text: String) async -> Bool {
+        if let cloud {
+            for ch in text {
+                await cloud.typeKey(ch)
+                try? await sleep(0.08)
+            }
+            return true
+        }
+        guard let window = webView.window, window === hostWindow || window.isKeyWindow else { return false }
+        window.makeFirstResponder(webView)
+        for ch in text {
+            for type in [NSEvent.EventType.keyDown, .keyUp] {
+                if let e = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                            windowNumber: window.windowNumber, context: nil, characters: String(ch),
+                                            charactersIgnoringModifiers: String(ch), isARepeat: false, keyCode: 0) {
+                    window.sendEvent(e)
+                }
+            }
+            try? await sleep(0.08)
+        }
+        return true
     }
 
     public enum Key {
