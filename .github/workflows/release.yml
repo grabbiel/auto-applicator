@@ -1,4 +1,5 @@
-# Tests the app, builds AutoApplicator.dmg and publishes it as a GitHub release (README › Releases).
+# Tests the app, builds AutoApplicator.dmg and publishes it as a GitHub release with update.json, which the app's
+# updater reads (README › Releases, › Updates).
 #   - A new VERSION reaching main publishes v<VERSION>: bump it in the pull request of a fix or improvement worth
 #     sharing, and merging it releases.
 #   - Pushing a tag v<VERSION> publishes that commit (or replaces the disk image of an existing release).
@@ -122,12 +123,16 @@ jobs:
       - name: Build the disk image
         env:
           AA_CLOUD_CONFIG: none
-        run: bash scripts/package.sh
+        run: |
+          bash scripts/package.sh
+          swift scripts/make_update_manifest.swift dist "$GITHUB_REPOSITORY"
 
       - uses: actions/upload-artifact@v4
         with:
           name: AutoApplicator-${{ env.VERSION }}
-          path: dist/AutoApplicator.dmg
+          path: |
+            dist/AutoApplicator.dmg
+            dist/update.json
           retention-days: 14
 
       - name: Publish the release
@@ -145,6 +150,10 @@ jobs:
               --title "Auto Applicator $VERSION" --notes-file .github/release-notes.md --generate-notes
             echo "Published $TAG."
           fi
+          # update.json last: the app's updater offers a release once it's there (with "what's new" from the notes).
+          gh release view "$TAG" --json body --jq .body > "$RUNNER_TEMP/notes.md"
+          swift scripts/make_update_manifest.swift dist "$GITHUB_REPOSITORY" "$RUNNER_TEMP/notes.md"
+          gh release upload "$TAG" dist/update.json --clobber
           echo "::notice::Download: https://github.com/$GITHUB_REPOSITORY/releases/latest/download/AutoApplicator.dmg"
 
       - name: Remove the signing keychain

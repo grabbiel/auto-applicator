@@ -170,6 +170,8 @@ final class CloudAITests: XCTestCase {
         try JSONEncoder().encode(Self.config).write(to: bundleDir.appendingPathComponent("CloudConfig.json"))
         let bundle = try XCTUnwrap(Bundle(url: bundleDir))
         XCTAssertEqual(CloudConfig.load(paths: home.paths, bundle: bundle)?.helperFunction, "auto-applicator-form-helper")
+        // Saved in the data folder too, so an update to a public build (no built-in copy) keeps the cloud AI.
+        XCTAssertEqual(CloudConfig.load(paths: home.paths, bundle: Bundle(for: Self.self))?.helperFunction, "auto-applicator-form-helper")
     }
 
     /// Opt-in: the deployed function, with made-up details (AA_CLOUD_TEST=1 and AWS credentials allowed to invoke it).

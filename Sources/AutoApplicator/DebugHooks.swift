@@ -12,6 +12,14 @@ enum DebugHooks {
         let env = ProcessInfo.processInfo.environment
         guard env["AA_HOME"]?.isEmpty == false else { return }
         if env["AA_DEMO"] == "1" { seed(model) }
+        // AA_UPDATE_TEST=restart|quit, with AA_UPDATE_FEED: once the update is ready, Restart now or quit (installing it).
+        if let test = env["AA_UPDATE_TEST"], ["restart", "quit"].contains(test) {
+            Task {
+                while model.updates.offer == nil { try? await Task.sleep(for: .seconds(1)) }
+                Log.info("AA_UPDATE_TEST: \(test)")
+                if test == "restart" { model.updates.restartNow(model) } else { model.quit() }
+            }
+        }
         guard let dir = env["AA_SNAPSHOTS"], !dir.isEmpty else { return }
         let out = URL(fileURLWithPath: dir, isDirectory: true)
         try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
@@ -111,7 +119,27 @@ enum DebugHooks {
             try? await Task.sleep(for: .seconds(1))
             logLayout("smallest window")
         }))
+        let sample = UpdateInfo(version: "9.9.0", url: URL(string: "https://example.com/AutoApplicator.dmg")!, sha256: "", size: 1,
+                                page: URL(string: "https://example.com/release"),
+                                notes: ["Update the app from inside it", "Fill more careers sites", "Keep the cloud AI after an update"])
+        list.append(("update-ready", {
+            model.showSignIn = false
+            mainWindow?.setContentSize(NSSize(width: 1240, height: 820))
+            model.settings.setupComplete = true
+            model.tourStep = nil
+            model.updates.state = .ready(sample)
+            model.page = .home
+        }))
+        list.append(("update-popover", { model.updates.showDetails = true }))
+        list.append(("update-manual-popover", {
+            model.updates.showDetails = false
+            try? await Task.sleep(for: .milliseconds(400))
+            model.updates.state = .manual(sample, URL(fileURLWithPath: "/tmp/x.dmg"), Updater.cantReplace(URL(fileURLWithPath: "/x/AppTranslocation/y/Auto Applicator.app")) ?? "")
+            model.updates.showDetails = true
+        }))
         list.append(("dark-home", {
+            model.updates.showDetails = false
+            model.updates.state = .idle
             model.showSignIn = false
             mainWindow?.setContentSize(NSSize(width: 1240, height: 820))
             model.tourStep = nil
@@ -171,7 +199,8 @@ enum DebugHooks {
     }
 
     private static func capture(_ name: String, to dir: URL) {
-        guard let window = mainWindow else { return }
+        let popover = NSApp.windows.first { $0.isVisible && String(describing: type(of: $0)).contains("Popover") }
+        guard let window = name.hasSuffix("-popover") ? popover : mainWindow else { return }
         let file = dir.appendingPathComponent("\(name).png")
         // A real window capture (needs Screen Recording permission); drawing the views ourselves is the fallback.
         let shot = Process()

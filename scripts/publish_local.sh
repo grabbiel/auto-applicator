@@ -30,4 +30,10 @@ else
     --title "Auto Applicator $VERSION" --notes-file .github/release-notes.md --generate-notes
   echo "Published $TAG."
 fi
+# update.json last: the app's updater offers a release once it's there.
+NOTES="$(mktemp)"
+gh release view "$TAG" --json body --jq .body > "$NOTES"
+swift scripts/make_update_manifest.swift dist grabbiel/auto-applicator "$NOTES"
+rm -f "$NOTES"
+gh release upload "$TAG" dist/update.json --clobber
 echo "Download: https://github.com/grabbiel/auto-applicator/releases/latest/download/AutoApplicator.dmg"

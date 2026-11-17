@@ -35,7 +35,8 @@ You need a Mac with Apple silicon (M1 or newer) and macOS 14 Sonoma or newer.
    | LinkedIn | Sign in once, on LinkedIn's own page inside the app. |
    | Email codes | Optional: an app password so it can read the codes some sites email you. |
 
-To update, download the newer disk image and drag the app over the old one. Your data is kept.
+From version 1.2.0 on, the app updates itself (see [Updates](#updates)). Before that, download the newer disk image
+and drag the app over the old one. Your data is kept either way.
 
 **To remove it:** quit it, move it to the Trash, and delete `~/Library/Application Support/AutoApplicator`.
 
@@ -86,6 +87,22 @@ The app itself contains no personal data, so it can be shared. Settings from ver
 - You're responsible for what's submitted under your name.
 - It doesn't solve "verify you're human" checks. A job that shows one fails and is listed in *Applications*.
 - Career sites change their pages over time; some will end in `FAILED_FORM_ERROR`, with a picture showing why.
+
+### Updates
+
+Every few hours the app checks the newest release on GitHub. When there's a new version, it downloads it, and the
+**Update** button appears at the top. The new version installs the next time the app quits (also after a daily run),
+or right away with **Restart now**. Turn this off under **Settings › Updates**, which also has **Check now**; the app
+menu has **Check for Updates…** too.
+
+Before installing, the app checks that the download is exactly the published disk image (size and SHA-256 from the
+release's `update.json`), that it holds the same app at the promised version, and that its signature is intact
+(and, for apps signed with a Developer ID, from the same developer). It then swaps the new app in, in one step, so
+the old one stays whole until the new one is in place.
+
+If macOS doesn't let the app replace itself, it says so and offers the disk image to drag over. That happens when it
+runs from the disk image or a download folder, from an account that can't change Applications, or when macOS asks
+for **App Management** permission (System Settings › Privacy & Security).
 
 ## Cloud browser (optional)
 
@@ -224,10 +241,17 @@ app fills a temporary folder with sample data, saves a PNG of each screen and qu
 
 ### Releases
 
-A release is a fix or improvement worth sharing: raise `VERSION` in its pull request (`1.1.0` → `1.1.1` for fixes,
-`1.2.0` for something new). When it's merged, [`release.yml`](.github/workflows/release.yml) tests the app, builds
+A release is a fix or improvement worth sharing: raise `VERSION` in its pull request (`1.2.0` → `1.2.1` for fixes,
+`1.3.0` for something new). When it's merged, [`release.yml`](.github/workflows/release.yml) tests the app, builds
 the disk image (never with a cloud browser address) and publishes `v<VERSION>` with install steps and the merged pull
-requests as its notes. The download link at the top always points to the newest one.
+requests as its notes. The download link at the top always points to the newest one. Last, it adds `update.json`
+([`make_update_manifest.swift`](scripts/make_update_manifest.swift)); from then on, every copy of the app offers the
+new version to install.
+
+To try an update before releasing it, point a copy with a test data folder at a local `update.json`:
+`AA_HOME=<temp folder> AA_UPDATE_FEED=file:///…/update.json` (its `url` can be a `file://` disk image).
+A copy with a built-in cloud configuration saves it to the data folder (`cloud.json`) on launch, so updating your
+own copy to a public release keeps the cloud browser and cloud AI.
 
 - Pull requests and main are built and tested by [`test.yml`](.github/workflows/test.yml).
 - Both run on GitHub's `xcode-27` Mac image, which is still a preview: a run can wait in the queue for a machine,

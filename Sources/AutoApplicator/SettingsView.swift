@@ -81,6 +81,8 @@ struct SettingsView: View {
             }
             .onAppear { accounts = model.db.accounts() }
 
+            card("Updates", "arrow.down.circle") { UpdatesSettingsView() }
+
             card("Your data", "externaldrive") {
                 Text(model.usesCloud
                      ? "Your profile, resume, answers and a PDF of every application stay on this Mac, in one folder. The cloud browser keeps only its cookies, in your AWS account."
