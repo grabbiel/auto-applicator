@@ -121,6 +121,27 @@ final class IMAPClient: @unchecked Sendable {
         r.untagged.filter { $0.line.hasPrefix("* SEARCH") }.flatMap { $0.line.split(separator: " ").dropFirst(2).compactMap { Int($0) } }
     }
 
+    /// When each message reached the mailbox (INTERNALDATE), without downloading any of them.
+    func arrivals(uids: [Int]) async throws -> [Int: Date] {
+        guard !uids.isEmpty else { return [:] }
+        let r = try await command("UID FETCH \(uids.map(String.init).joined(separator: ",")) (UID INTERNALDATE)")
+        return Self.arrivals(r.untagged.map(\.line))
+    }
+
+    /// `* 12 FETCH (UID 345 INTERNALDATE " 6-Nov-2026 21:30:00 +0000")` → [345: that time].
+    static func arrivals(_ lines: [String]) -> [Int: Date] {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "d-MMM-yyyy HH:mm:ss Z"
+        var out: [Int: Date] = [:]
+        for line in lines {
+            guard let u = Regex(#"\bUID (\d+)"#, []).firstGroups(line), let uid = Int(u[1] ?? ""),
+                  let d = Regex(#"INTERNALDATE "([^"]+)""#, []).firstGroups(line), let date = f.date(from: (d[1] ?? "").trimmed) else { continue }
+            out[uid] = date
+        }
+        return out
+    }
+
     func fetch(uid: Int) async throws -> Data? {
         let r = try await command("UID FETCH \(uid) (BODY.PEEK[])")
         return r.untagged.first { $0.literal != nil }?.literal

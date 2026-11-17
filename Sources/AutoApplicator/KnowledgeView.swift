@@ -234,7 +234,8 @@ private struct AnswerRow: View {
         case "edited": "You (edited)"
         case "declined": "You can't answer"
         case "llm:high": "AI, confident"
-        default: answer.source.hasPrefix("llm") ? "AI" : "Profile"
+        case "cloud:high": "Cloud AI, confident"
+        default: answer.source.hasPrefix("cloud") ? "Cloud AI" : answer.source.hasPrefix("llm") ? "AI" : "Profile"
         }
     }
 

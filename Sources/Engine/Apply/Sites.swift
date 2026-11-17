@@ -84,6 +84,8 @@ final class EasyApplyHandler: ApplicationHandler {
         return await failure("Easy Apply went past \(ctx.limits.maxFormSteps) pages.")
     }
 
+    override var lookForHiddenResumeBox: Bool { false }
+
     /// LinkedIn keeps resumes uploaded before; if one is already selected, don't upload another copy.
     override func handleDocuments(_ fields: [FormField]) async throws -> (handled: Set<String>, missing: [String]) {
         if await web.bool(Scripts.easyApplyResumeSelected) {
@@ -165,6 +167,15 @@ final class GreenhouseHandler: ApplicationHandler {
 
     override func apply() async throws -> ApplyResult {
         var root = await formRoot()
+        // A company's own careers page (…?gh_jid=123): the form is in a frame from Greenhouse, which the app can't
+        // reach into from the page, or not drawn until Apply is pressed. Greenhouse's own page for it instead.
+        if root == nil, let url = web.url, !(url.host ?? "").lowercased().hasSuffix("greenhouse.io"), let own = await Self.formPage(web, url) {
+            Log.info("Opening Greenhouse's own page for the form: \(own.absoluteString)")
+            try await web.load(own)
+            _ = await web.waitFor(Self.formSelectors.joined(separator: ", "), timeout: 12)
+            await web.dismissBanners()
+            root = await formRoot()
+        }
         if root == nil {
             try await clickApplyEntry()
             try await web.sleep(1.5)
@@ -172,6 +183,26 @@ final class GreenhouseHandler: ApplicationHandler {
         }
         guard let root else { return await failure("Couldn't find the Greenhouse application form.") }
         return try await runFormFlow(root: root)
+    }
+
+    /// Where a careers page's Greenhouse form lives: its Greenhouse frame (waited for a moment: it's added by a
+    /// script), else Greenhouse's page for the job number, which finds the company's board itself
+    /// (boards.greenhouse.io/embed/job_app?token=123 → job-boards.greenhouse.io/embed/job_app?for=stripe&token=123).
+    static func formPage(_ web: WebAgent, _ url: URL) async -> URL? {
+        for _ in 0..<4 {
+            let src = await web.string(#"""
+                const f = [...document.querySelectorAll('iframe')].find(f => /^https:\/\/[a-z0-9.-]*greenhouse\.io\/.*job_app/i.test(f.src || ''));
+                return f ? f.src : '';
+                """#)
+            if let u = URL(string: src), !src.isEmpty { return u }
+            try? await web.sleep(1)
+        }
+        let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        guard let jid = query.first(where: { $0.name == "gh_jid" })?.value, Regex(#"^\d{4,}$"#).matches(jid) else { return nil }
+        var c = URLComponents(string: "https://boards.greenhouse.io/embed/job_app")!
+        c.queryItems = [URLQueryItem(name: "token", value: jid)]
+        if let src = query.first(where: { $0.name == "gh_src" })?.value, !src.isEmpty { c.queryItems?.append(URLQueryItem(name: "gh_src", value: src)) }
+        return c.url
     }
 
     override func afterSubmit(submittedAt: Date) async throws -> ApplyResult? {
@@ -269,6 +300,10 @@ final class AshbyHandler: ApplicationHandler {
             }
         }
         guard await web.waitFor("input[type=file], input[type=email], #_systemfield_name", timeout: 15) else {
+            // A posting taken down: Ashby shows "Page not found" at its address.
+            if Regex(#"\bpage not found\b|page you requested was not found|job (is )?no longer (available|open)"#).matches(norm(await web.text(maxChars: 600))) {
+                return await failure("The job is no longer on the company's Ashby job board.")
+            }
             return await failure("Couldn't find the Ashby application form.")
         }
         return try await runFormFlow(root: nil)
@@ -315,6 +350,10 @@ final class WorkdayHandler: ApplicationHandler {
     static let ready = ["adventureButton", "autofillWithResume", "applyManually", "email", "signInLink", "createAccountLink", "SignInWithEmailButton",
                         "bottom-navigation-next-button", "pageFooterNextButton"].map(aid).joined(separator: ", ")
 
+    /// What pressing the job page's Apply opens: the start choices, a sign-in box, or the form itself.
+    static let afterApply = ["autofillWithResume", "applyManually", "useMyLastApplication", "email", "signInLink", "createAccountLink",
+                             "SignInWithEmailButton", "bottom-navigation-next-button", "pageFooterNextButton"].map(aid).joined(separator: ", ")
+
     /// Workday draws each page with scripts after it loads: wait for it (up to `timeout`) before reading it.
     private func waitForPage(timeout: TimeInterval = 15) async throws {
         _ = await web.waitFor(Self.ready, visible: true, timeout: timeout)
@@ -329,11 +368,13 @@ final class WorkdayHandler: ApplicationHandler {
         if !(await web.exists(Self.ready)), Self.gone.matches(await web.text(maxChars: 1500)) {
             return await failure("The job is no longer on the company's Workday site.")
         }
-        if await visible("adventureButton") {
-            await web.click(Self.aid("adventureButton"))
-            try await web.sleep(2)
-            try await waitForPage()
+        // A job Workday has taken down opens the site's job search instead (…/External_Career_Site, no /job/).
+        if let path = web.url?.path, !path.contains("/job/"), !(await web.exists(Self.ready)), await web.exists(Self.aid("jobResults")) || !path.contains("/apply") {
+            return await failure("The job is no longer on the company's Workday site (its link opens the site's job search).")
         }
+        // Closing a cookie banner can redraw the job page (Nike's): its Apply button may be back a moment later.
+        if !(await web.isVisible(Self.afterApply)) { _ = await web.waitFor(Self.ready, visible: true, timeout: 5) }
+        try await pressApply()
         var usedAutofill = try await chooseStart()
         try await waitForPage()
         if let gate = try await signIn() { return gate }
@@ -361,9 +402,18 @@ final class WorkdayHandler: ApplicationHandler {
                 if email || link || choices {
                     if let gate = try await signIn() { return gate }
                 }
+                // Still on the job page (its Apply wasn't there to press yet): press it now and start again.
+                if try await pressApply() {
+                    if try await chooseStart() { usedAutofill = true; await uploadResume() }
+                    if let gate = try await signIn() { return gate }
+                }
                 try await web.sleep(0.75)
             }
-            guard !label.isEmpty else { return await failure("Workday: no Next or Submit button on this page.") }
+            guard !label.isEmpty else {
+                let shown = await web.string(Scripts.prelude + "return [...document.querySelectorAll('[data-automation-id]')].filter(shown).map(e => e.dataset.automationId).filter((v, i, a) => a.indexOf(v) === i).slice(0, 30).join(' ');")
+                Log.info("Workday: no Next or Submit; the page shows \(shown)")
+                return await failure("Workday: no Next or Submit button on this page.")
+            }
             if Regex(#"^submit"#).matches(label) {
                 if ctx.practice { return await practiceResult() }
                 ctx.step("Submitting")
@@ -409,9 +459,23 @@ final class WorkdayHandler: ApplicationHandler {
         try await web.sleep(0.8)
     }
 
+    /// Presses the job page's Apply, if it shows, and waits for what it opens. True if it was pressed.
+    @discardableResult
+    private func pressApply() async throws -> Bool {
+        guard await visible("adventureButton"), !(await web.isVisible(Self.afterApply)) else { return false }
+        Log.info("Workday: pressing the job page's Apply")
+        await web.click(Self.aid("adventureButton"))
+        try await web.sleep(2)
+        // The start choices open in a popup over the job page, whose Apply button still counts as "ready".
+        _ = await web.waitFor(Self.afterApply, visible: true, timeout: 10)
+        try await waitForPage()
+        return true
+    }
+
     /// Prefers "Autofill with Resume", else "Apply Manually". True if autofill was chosen.
     private func chooseStart() async throws -> Bool {
         for (name, autofill) in [("autofillWithResume", true), ("applyManually", false)] where await visible(name) {
+            Log.info("Workday: starting with \(name)")
             await web.click(Self.aid(name))
             try await web.sleep(2.5)
             return autofill
@@ -1151,6 +1215,10 @@ enum SiteRouter {
             }
             let ats = web.url.map(detect) ?? .generic
             if ats != .generic { return .ready(ats) }
+            // A job board that sends a gone job back to its list (CareerPuck's "?notFound=6123483004").
+            if let q = web.url?.query, Regex(#"(^|&)(notfound|jobnotfound|job_not_found)=\w"#).matches(q.lowercased()) {
+                return .stop("The company's site says this job is closed.")
+            }
             switch page.kind {
             case .closed where page.fields == 0:
                 return .stop("The company's site says this job is closed.")
@@ -1197,7 +1265,9 @@ enum SiteRouter {
     @MainActor
     static func openFramedForm(_ web: WebAgent, pageFields: Int) async throws -> ATSType? {
         let frames = ((try? await web.js(Scripts.frames)) as? [[String: Any]]) ?? []
-        let junk = Regex(#"recaptcha|hcaptcha|captcha|youtube|vimeo|google\.com/maps|doubleclick|demdex|googletag|facebook|twitter|chat|intercom|drift|zendesk|onetrust|cookie"#)
+        // (Videos, maps, chats and banners; ceros.com is a story told in pictures: SAIC's career page; Pixlee shows
+        // photos with a "Next" of its own: Carnival's.)
+        let junk = Regex(#"pixlee|olapic|curalate|yotpo|bazaarvoice|stackla|taggbox|juicer\.io|flockler|walls\.io|recaptcha|hcaptcha|captcha|youtube|vimeo|google\.com/maps|doubleclick|demdex|googletag|facebook|twitter|chat|intercom|drift|zendesk|onetrust|cookie|ccpa|gdpr|consent|privacy|truste|usercentrics|ceros\.com|vidyard|wistia|brightcove|jwplayer|kaltura|panopto|issuu|flipsnack|spotify|soundcloud|instagram|tiktok|matterport"#)
         let usable = frames.compactMap { f -> (url: URL, area: Int, shown: Bool, fields: Int, entry: Bool)? in
             guard let src = f["src"] as? String, let url = URL(string: src), !junk.matches(src) else { return nil }
             return (url, (f["area"] as? NSNumber)?.intValue ?? 0, (f["shown"] as? Bool) ?? false, (f["fields"] as? NSNumber)?.intValue ?? -1,

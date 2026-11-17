@@ -11,6 +11,18 @@ extension AppModel {
     var cloudSignedIn: Bool { !secrets.cloudRefreshToken.isEmpty }
     /// The next run will use the cloud browser.
     var usesCloud: Bool { cloudAvailable && cloudSignedIn && settings.cloudBrowser }
+    /// This copy of the app knows the cloud AI (deployed with it).
+    var cloudHelperAvailable: Bool { !(cloudConfig?.helperFunction ?? "").isEmpty }
+    /// The next run will ask the cloud AI what the on-device AI can't answer.
+    var usesCloudHelper: Bool { usesCloud && cloudHelperAvailable && settings.ai.cloudHelper }
+
+    /// The cloud AI for a run in the cloud browser: asked only about the questions the on-device AI couldn't answer,
+    /// with the cloud sign-in's credentials (the only ones allowed to call it).
+    func makeCloudHelper() -> AIService? {
+        guard let config = cloudConfig, let account = cloudAccount,
+              let model = CloudModel(config: config, credentials: { try await account.credentials() }) else { return nil }
+        return AIService(model: model)
+    }
 
     /// The account saved (or dropped) its sign-in.
     func cloudSignInChanged(_ token: String?) {
@@ -92,9 +104,27 @@ extension AppModel {
             agent.close()
             settings.cloudLinkedIn = recognized
             let start = "Working: Chrome started in \(String(format: "%.1f", ready)) s"
-            cloudTest = CloudTest(ok: true, message: recognized ? "\(start) and LinkedIn recognized you." : "\(start). Sign in to LinkedIn in it (Settings › LinkedIn) before a run.", image: image)
+            var message = recognized ? "\(start) and LinkedIn recognized you." : "\(start). Sign in to LinkedIn in it (Settings › LinkedIn) before a run."
+            let ai = await checkCloudHelper()
+            if let ai { message += " " + ai.message }
+            cloudTest = CloudTest(ok: ai?.ok ?? true, message: message, image: image)
         } catch {
             cloudTest = CloudTest(ok: false, message: error.localizedDescription, image: nil)
+        }
+    }
+
+    /// Asks the cloud AI one made-up question with this sign-in's credentials, the way runs do (nil when it's off).
+    private func checkCloudHelper() async -> (ok: Bool, message: String)? {
+        guard settings.ai.cloudHelper, let helper = makeCloudHelper() else { return nil }
+        cloudBusy = "Asking the cloud AI…"
+        let started = Date()
+        do {
+            let reply = try await helper.model.generate(instructions: "Answer the question with a number.", prompt: "What is 2 + 3?",
+                                                        schema: .object([("answer", .number)]))
+            guard reply["answer"] != nil else { return (false, "The cloud AI's reply was empty.") }
+            return (true, "\(helper.displayName) answered in \(String(format: "%.1f", Date().timeIntervalSince(started))) s.")
+        } catch {
+            return (false, "The cloud AI didn't answer: \(error.localizedDescription)")
         }
     }
 
@@ -217,6 +247,13 @@ struct CloudBrowserView: View {
                 ToggleRow(title: "Use the cloud browser for runs",
                           detail: "This Mac still directs each run, so keep it awake. Your LinkedIn sign-in is carried over; nothing is recorded.",
                           isOn: $model.settings.cloudBrowser)
+                if model.cloudHelperAvailable {
+                    ToggleRow(title: "Ask the cloud AI what the on-device AI can't answer",
+                              detail: "On runs in the cloud browser, questions the on-device AI isn't sure about go to \(model.cloudConfig?.helperName ?? "a stronger model") in your AWS account, with your profile minus your email and phone. Its answers follow the same rules (cite your profile, or ask you), are saved, and help the on-device AI from then on.",
+                              isOn: $model.settings.ai.cloudHelper)
+                        .disabled(!model.settings.cloudBrowser)
+                        .opacity(model.settings.cloudBrowser ? 1 : 0.5)
+                }
                 HStack(spacing: 8) {
                     Button("Test it") { Task { await model.testCloud() } }.buttonStyle(SecondaryButtonStyle())
                     Button("Add a passkey") { Task { await model.addCloudPasskey() } }.buttonStyle(SecondaryButtonStyle())

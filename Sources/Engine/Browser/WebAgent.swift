@@ -21,6 +21,9 @@ public final class WebAgent: NSObject, WKNavigationDelegate, WKUIDelegate {
     private var eventNumber = 1
     /// Called when the page asks to open a new window (a link with target=_blank, window.open).
     public var popupOpened: ((URL) -> Void)?
+    /// Site checks only (never set in the app): asked before each click with what is about to be pressed
+    /// ("button: Create account", "input checkbox: I agree") and its selector; false leaves it unpressed.
+    public var willPress: ((_ what: String, _ selector: String) async -> Bool)?
     public private(set) var lastNavigationError: String?
     /// Set when this agent drives the cloud browser instead of the built-in one (see CloudBrowser).
     public let cloud: CloudBrowser?
@@ -41,6 +44,12 @@ public final class WebAgent: NSObject, WKNavigationDelegate, WKUIDelegate {
         webView = WKWebView(frame: NSRect(origin: .zero, size: Self.viewport), configuration: config)
         webView.allowsBackForwardNavigationGestures = false
         webView.allowsMagnification = false
+        // The window sits behind the person's own windows, and a covered window counts as hidden: WebKit then stops
+        // drawing the page (no animation frames), and pages drawn by web components never appear (ADP's job pages
+        // stayed blank). WebKit's own switch (not public API) keeps it drawing.
+        if webView.responds(to: Selector(("_setWindowOcclusionDetectionEnabled:"))) {
+            webView.setValue(false, forKey: "windowOcclusionDetectionEnabled")
+        }
         // The window is on screen but fully transparent and click-through: WebKit then treats the page as visible
         // (an off-screen window makes it "hidden", which pauses animation frames and breaks many sites).
         let origin = NSScreen.screens.first?.frame.origin ?? .zero
@@ -210,15 +219,11 @@ public final class WebAgent: NSObject, WKNavigationDelegate, WKUIDelegate {
         if let cloud { return try await cloud.run(body, args, pageWorld: world == .page) }
         let world = world ?? .defaultClient
         let wrapped = Scripts.deepDocument + "\nconst __r = await (async () => { \(body) })(); return __r === undefined ? null : __r;"
-        let result: Any = try await withCheckedThrowingContinuation { cont in
-            webView.callAsyncJavaScript(wrapped, arguments: args, in: nil, in: world) { result in
-                switch result {
-                case .success(let v): cont.resume(returning: v)
-                case .failure(let e): cont.resume(throwing: e)
-                }
-            }
+        let result: Result<Any, Error> = await Self.callback(within: Self.scriptTimeLimit, orElse: .failure(PageNotAnswering())) { done in
+            webView.callAsyncJavaScript(wrapped, arguments: args, in: nil, in: world) { result in done(result) }
         }
-        return result is NSNull ? nil : result
+        let value = try result.get()
+        return value is NSNull ? nil : value
     }
 
     @discardableResult
@@ -286,6 +291,9 @@ public final class WebAgent: NSObject, WKNavigationDelegate, WKUIDelegate {
             if (!el) return null;
             const label = el.labels && el.labels[0];
             let aim = el;
+            // A hidden radio inside the choice people press (Rippling's): that choice.
+            // (Radix's copy sits out of reach, see-through and aria-hidden, just after its button: that button.)
+            if (!label && (!shown(el) || el.getAttribute('aria-hidden') === 'true') && shown(ariaChoice(el))) aim = ariaChoice(el);
             if (el.tagName === 'INPUT' && /^(checkbox|radio)$/.test(el.type) && label) {
               const r0 = el.getBoundingClientRect();
               if (r0.width < 4 || r0.height < 4 || getComputedStyle(el).opacity === '0') {
@@ -337,6 +345,16 @@ public final class WebAgent: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// when the element is covered or the click didn't land.
     @discardableResult
     public func click(_ selector: String) async -> Bool {
+        if let willPress {
+            let what = await string(Scripts.prelude + """
+                const el = document.querySelector(sel); if (!el) return '';
+                const name = (el.getAttribute('aria-label') || words(el) || el.title || '').replace(/\\s+/g, ' ').trim();
+                const label = el.labels && el.labels[0] ? el.labels[0].innerText.replace(/\\s+/g, ' ').trim() : '';
+                return el.tagName.toLowerCase() + (el.type ? ' ' + el.type : '') + (el.getAttribute('role') ? ' ' + el.getAttribute('role') : '')
+                    + ': ' + (name || label).slice(0, 120);
+                """, ["sel": selector])
+            guard await willPress(what, selector) else { return false }
+        }
         // Without a point to press (a zero-size element), the script click below still works.
         if let (p, covered) = await target(selector), !covered, cloud != nil || webView.window != nil {
             let aimed = "(document.__aaAim && document.__aaAim.isConnected ? document.__aaAim : document.querySelector(sel))"
@@ -382,11 +400,21 @@ public final class WebAgent: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     public func selectOption(_ selector: String, label: String) async -> Bool {
-        await bool(Scripts.selectOption, ["sel": selector, "label": label])
+        if await bool(Scripts.selectOption, ["sel": selector, "label": label]) { return true }
+        // A list the page draws from its own state (Toyota's Phenom "Device Type"): it shows the old choice for a moment,
+        // then the new one.
+        try? await sleep(0.4)
+        return await bool("""
+            let el = null; try { el = document.querySelector(sel); } catch (e) {}
+            if (!el || el.tagName !== 'SELECT' || el.selectedIndex < 0) return false;
+            const n = s => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+            const o = el.options[el.selectedIndex];
+            return !!n(label) && (n(o.text) === n(label) || n(o.value) === n(label));
+            """, ["sel": selector, "label": label])
     }
 
     public func isChecked(_ selector: String) async -> Bool {
-        await bool("try { const el = document.querySelector(sel); return !!(el && (el.checked || el.getAttribute('aria-checked') === 'true' || el.getAttribute('aria-pressed') === 'true')); } catch (e) { return false; }",
+        await bool(Scripts.prelude + "try { const el = document.querySelector(sel); const c = ariaChoice(el); return !!(el && (el.checked || el.getAttribute('aria-checked') === 'true' || el.getAttribute('aria-pressed') === 'true' || (c && c.getAttribute('aria-checked') === 'true'))); } catch (e) { return false; }",
                    ["sel": selector])
     }
 
@@ -470,15 +498,15 @@ public final class WebAgent: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// The whole page as a PDF (searchable text, every part of a long form).
     public func pdf() async -> Data? {
         if let cloud { return await cloud.pdf() }
-        return await withCheckedContinuation { cont in
-            webView.createPDF { result in cont.resume(returning: try? result.get()) }
+        return await Self.callback(within: 30, orElse: nil) { done in
+            webView.createPDF { result in done(try? result.get()) }
         }
     }
 
     public func snapshot() async -> NSImage? {
         if let cloud { return await cloud.screenshot() }
-        return await withCheckedContinuation { cont in
-            webView.takeSnapshot(with: nil) { image, _ in cont.resume(returning: image) }
+        return await Self.callback(within: 20, orElse: nil) { done in
+            webView.takeSnapshot(with: nil) { image, _ in done(image) }
         }
     }
 
@@ -495,6 +523,29 @@ public final class WebAgent: NSObject, WKNavigationDelegate, WKUIDelegate {
             WKWebsiteDataStore.default().httpCookieStore.getAllCookies { cookies in
                 cont.resume(returning: cookies.filter { $0.domain.hasSuffix(domain) })
             }
+        }
+    }
+
+    /// How long a script may run in the page before the app stops waiting for it.
+    static let scriptTimeLimit: TimeInterval = 60
+
+    /// A page that stopped answering the app's scripts (twonice's Trakstar page once never did, which held the run).
+    public struct PageNotAnswering: LocalizedError {
+        public var errorDescription: String? { "The page stopped responding" }
+    }
+
+    /// Waits for a WebKit callback, but no longer than `seconds` (then `fallback`): a page whose script never returns, or
+    /// that stopped drawing, would otherwise hold the whole run, which cancelling can't end.
+    static func callback<T>(within seconds: TimeInterval, orElse fallback: T, _ start: (@escaping (T) -> Void) -> Void) async -> T {
+        await withCheckedContinuation { (cont: CheckedContinuation<T, Never>) in
+            var finished = false
+            let finish: (T) -> Void = { value in
+                guard !finished else { return }
+                finished = true
+                cont.resume(returning: value)
+            }
+            start(finish)
+            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { MainActor.assumeIsolated { finish(fallback) } }
         }
     }
 

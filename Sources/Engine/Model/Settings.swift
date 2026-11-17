@@ -191,14 +191,17 @@ public enum AIEngineChoice: String, Codable, CaseIterable, Sendable {
 public struct AISettings: Codable, Equatable, Sendable {
     public var engine: AIEngineChoice = .automatic
     public var ollamaModel = "qwen2.5:7b"
+    /// Runs in the cloud browser ask the cloud AI about questions the on-device AI couldn't answer.
+    public var cloudHelper = true
 
     public init() {}
-    enum CodingKeys: String, CodingKey { case engine, ollamaModel = "ollama_model" }
+    enum CodingKeys: String, CodingKey { case engine, ollamaModel = "ollama_model", cloudHelper = "cloud_helper" }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         engine = (try? c.decodeIfPresent(AIEngineChoice.self, forKey: .engine)) ?? .automatic
         ollamaModel = (try? c.decodeIfPresent(String.self, forKey: .ollamaModel)) ?? "qwen2.5:7b"
+        cloudHelper = (try? c.decodeIfPresent(Bool.self, forKey: .cloudHelper)) ?? true
     }
 }
 

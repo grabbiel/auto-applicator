@@ -12,10 +12,38 @@ public struct CloudConfig: Codable, Sendable, Equatable {
     public var browserProfileId: String
     /// Google and Apple, when the sign-in page offers them ("Google", "SignInWithApple"); missing in older files.
     public var signInProviders: [String]?
+    /// The cloud AI: the function only a signed-in user may call, and the model behind it ("us.amazon.nova-2-lite-v1:0").
+    /// Missing in files written before it existed.
+    public var helperFunction: String?
+    public var helperModel: String?
 
     /// The offered providers as people call them.
     public var providerNames: [String] {
         (signInProviders ?? []).map { $0 == "SignInWithApple" ? "Apple" : $0 }
+    }
+
+    /// The cloud AI as people call it: "Amazon Nova 2 Lite", "Claude Sonnet 4.6".
+    public var helperName: String {
+        guard let id = helperModel, !id.isEmpty else { return "The cloud AI" }
+        return Self.modelName(id)
+    }
+
+    /// "us.anthropic.claude-haiku-4-5-20251001-v1:0" → "Claude Haiku 4.5", "us.amazon.nova-2-lite-v1:0" → "Amazon Nova 2 Lite".
+    static func modelName(_ id: String) -> String {
+        let parts = id.split(separator: ".", maxSplits: 2).map(String.init)
+        guard parts.count == 3, let name = parts[2].split(separator: ":").first else { return id }
+        var words: [String] = []
+        var lastWasNumber = false
+        for w in name.split(separator: "-").map(String.init) where !Regex(#"^(v\d+|\d{8})$"#).fullMatch(w) {
+            let number = w.allSatisfy { $0.isNumber || $0 == "." }
+            if number && lastWasNumber {
+                words[words.count - 1] += "." + w  // "4-6" → "4.6"
+            } else {
+                words.append(["gpt", "glm", "oss"].contains(w) ? w.uppercased() : w.prefix(1).uppercased() + w.dropFirst())
+            }
+            lastWasNumber = number
+        }
+        return (parts[1] == "amazon" ? "Amazon " : "") + words.joined(separator: " ")
     }
 
     public static let callbackScheme = "autoapplicator"
@@ -23,11 +51,22 @@ public struct CloudConfig: Codable, Sendable, Equatable {
 
     /// `cloud.json` in the data folder (if someone put one there), else the copy inside the app.
     public static func load(paths: AppPaths, bundle: Bundle = .main) -> CloudConfig? {
-        let candidates = [paths.home.appendingPathComponent("cloud.json"), bundle.url(forResource: "CloudConfig", withExtension: "json")]
-        for case let url? in candidates {
-            if let data = try? Data(contentsOf: url), let config = try? JSONDecoder().decode(CloudConfig.self, from: data) { return config }
+        let read = { (url: URL?) -> CloudConfig? in
+            url.flatMap { try? Data(contentsOf: $0) }.flatMap { try? JSONDecoder().decode(CloudConfig.self, from: $0) }
         }
-        return nil
+        return merged(read(paths.home.appendingPathComponent("cloud.json")),
+                      builtIn: read(bundle.url(forResource: "CloudConfig", withExtension: "json")))
+    }
+
+    /// The data folder's file wins, but what it leaves out (a file written before the cloud AI existed has no
+    /// `helperFunction`) comes from the app's own copy when both describe the same sign-in.
+    static func merged(_ local: CloudConfig?, builtIn: CloudConfig?) -> CloudConfig? {
+        guard var config = local else { return builtIn }
+        guard let builtIn, builtIn.region == config.region, builtIn.userPoolId == config.userPoolId else { return config }
+        if (config.helperFunction ?? "").isEmpty { config.helperFunction = builtIn.helperFunction }
+        if (config.helperModel ?? "").isEmpty { config.helperModel = builtIn.helperModel }
+        if config.signInProviders == nil { config.signInProviders = builtIn.signInProviders }
+        return config
     }
 
     var issuer: String { "cognito-idp.\(region).amazonaws.com/\(userPoolId)" }

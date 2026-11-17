@@ -549,7 +549,8 @@ final class AppModel {
                 let agent = try await self.makeRunBrowser()
                 browser = agent
                 self.runAgent = agent
-                let runner = JobRunner(paths: self.paths, db: self.db, web: agent, ai: self.ai, practice: practice) { [weak self] event in
+                let helper = self.runInCloud && self.settings.ai.cloudHelper ? self.makeCloudHelper() : nil
+                let runner = JobRunner(paths: self.paths, db: self.db, web: agent, ai: self.ai, helper: helper, practice: practice) { [weak self] event in
                     self?.handle(event)
                 }
                 let summary = try await runner.run()

@@ -58,7 +58,7 @@ public struct FieldSpec: Equatable, Sendable {
             + #"(job |position )?title|position|role|company( name)?|employer( name)?|organi[sz]ation( name)?|school( name)?|institution|"#
             + #"degree|discipline|field of study|major|description|responsibilities|summary|location|city|state|country|zip|postal code|"#
             + #"address( line \d)?|street|(full )?name|first name|last name|e-?mail( address)?|phone( number)?|relationship|"#
-            + #"current(ly)?( (work|working|attend|attending) here)?|i (currently )?(work|attend) here|still (working|attending)|gpa|grade|"#
+            + #"current(ly)?( (work|working|attend|attending) here)?|currently pursuing( this degree)?|i (currently )?(work|attend) here|i currently (work|attend)|still (working|attending)|gpa|grade|"#
             + #"reason for leaving|supervisor|manager)( \d+)?$"#)
 
     /// One name per kind of section, so the same question in "EDUCATION" and "Your education" is the same question.
@@ -148,8 +148,15 @@ public func normalizeQuestion(_ text: String) -> String {
     return t
 }
 
-/// normalizeQuestion with typographic apostrophes folded, as the matcher uses it.
-public func norm(_ text: String) -> String { normalizeQuestion(text).replacingOccurrences(of: "’", with: "'") }
+/// How to use a box, in brackets after its question: "School name (type to find; select “Other” if not listed)" (Dropbox's).
+private let howToHint = Regex(#"\s*\((?:type|start typing|begin typing|search|select|choose|pick)\b[^)]{0,80}\)"#)
+
+/// normalizeQuestion with typographic apostrophes folded and how-to hints left out, as the matcher uses it. (The
+/// saved answers' key, `questionHash`, keeps the hints.)
+public func norm(_ text: String) -> String {
+    let bare = text.contains("(") ? howToHint.replace(text, with: " ") : text
+    return normalizeQuestion(bare).replacingOccurrences(of: "’", with: "'")
+}
 
 /// SHA-256 of normalized label + type + sorted normalized options (the qa_cache key).
 public func questionHash(_ label: String, _ type: String, _ options: [String] = []) -> String {

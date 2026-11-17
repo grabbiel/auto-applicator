@@ -2,8 +2,9 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   Auto Applicator cloud browser. A managed Chrome (Amazon Bedrock AgentCore Browser) the app can drive instead of
   its built-in browser, plus an invite-only sign-in (password, passkey, Google or Apple) that hands the app
-  short-lived AWS credentials allowed to do nothing but use that browser. Idle cost is zero: the browser is billed
-  only while a session runs.
+  short-lived AWS credentials allowed to do nothing but use that browser and ask its cloud AI (a model on Amazon
+  Bedrock, for form questions the on-device AI couldn't answer). Idle cost is zero: the browser is billed only while a
+  session runs, the AI only per question.
 
 Parameters:
   DomainPrefix:
@@ -30,6 +31,16 @@ Parameters:
     MinValue: 1
     MaxValue: 365
     Description: How long a sign-in lasts before the app asks again.
+  HelperModel:
+    Type: String
+    # Amazon's own model works in every account. Claude (us.anthropic.claude-sonnet-4-6) is stronger but needs
+    # Anthropic's one-time use-case form in the Bedrock console first; other providers need their Marketplace offer
+    # accepted once.
+    Default: us.amazon.nova-2-lite-v1:0
+    AllowedPattern: "^us\\.[a-z0-9-]+\\.[a-z0-9.:-]+$"
+    Description: >-
+      The cloud AI: a US cross-region inference profile (us.<provider>.<model>) that supports tool use. The app asks it
+      only about form questions the on-device AI couldn't answer.
 
 Conditions:
   HasGoogle: !Equals [!Ref GoogleSignIn, "true"]
@@ -252,7 +263,7 @@ Resources:
   BrowserUserRole:
     Type: AWS::IAM::Role
     Properties:
-      Description: "What a signed-in Auto Applicator user may do: use the cloud browser, nothing else."
+      Description: "What a signed-in Auto Applicator user may do: use the cloud browser and ask its cloud AI, nothing else."
       MaxSessionDuration: 3600
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -288,6 +299,10 @@ Resources:
                   - bedrock-agentcore:ConnectBrowserLiveViewStream
                   - bedrock-agentcore:ListBrowserSessions
                 Resource: "*"
+              - Sid: CloudAI              # through the function only: never Bedrock itself
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt FormHelper.Arn
       Tags:
         - Key: App
           Value: !Ref AppTag
@@ -320,12 +335,141 @@ Resources:
       Tags:
         App: !Ref AppTag
 
+  # ---- The cloud AI ---------------------------------------------------------------------------------------------
+  # A stronger model for the few form questions the on-device AI can't answer. Only a signed-in user's credentials
+  # (BrowserUserRole) may call this function, and the function may call only the one model, with a fixed answer
+  # shape and size. Prompts carry the candidate's details, so nothing logs them: the function logs token counts,
+  # and Bedrock's model invocation logging stays off.
+  FormHelper:
+    Type: AWS::Lambda::Function
+    DependsOn: FormHelperLogs
+    Properties:
+      FunctionName: auto-applicator-form-helper
+      Description: Answers the form questions the app's on-device AI couldn't, with a model on Amazon Bedrock.
+      Runtime: python3.13
+      Architectures: [arm64]
+      Handler: index.handler
+      MemorySize: 256
+      Timeout: 120
+      ReservedConcurrentExecutions: 2     # one run asks one question at a time; this also caps the spend
+      Role: !GetAtt FormHelperRole.Arn
+      Environment:
+        Variables:
+          MODEL: !Ref HelperModel
+      Code:
+        ZipFile: |
+          import json
+          import os
+
+          import boto3
+          from botocore.config import Config
+          from botocore.exceptions import ClientError
+
+          MODEL = os.environ["MODEL"]
+          NOVA2 = ".amazon.nova-2" in MODEL  # thinks before answering; Claude can't while it must answer with the tool
+          bedrock = boto3.client("bedrock-runtime", config=Config(read_timeout=110, retries={"max_attempts": 4, "mode": "adaptive"}))
+
+
+          def handler(event, context):
+              system, prompt, schema = event.get("system"), event.get("prompt"), event.get("schema")
+              if not (isinstance(system, str) and isinstance(prompt, str) and isinstance(schema, dict) and schema.get("type") == "object"):
+                  return {"error": "bad request"}
+              if len(system) > 8000 or len(prompt) > 60000 or len(json.dumps(schema)) > 60000:
+                  return {"error": "too long"}
+              request = dict(
+                  modelId=MODEL,
+                  system=[{"text": system}],
+                  messages=[{"role": "user", "content": [{"text": prompt}]}],
+                  # Nova 2's thinking counts toward its limit: 4000 cut off four answers in ten.
+                  inferenceConfig={"maxTokens": 10000} if NOVA2 else {"maxTokens": 3000, "temperature": 0},
+                  toolConfig={"tools": [{"toolSpec": {"name": "answer", "description": "Records the answer to every field.",
+                                                      "inputSchema": {"json": schema}}}],
+                              "toolChoice": {"tool": {"name": "answer"}}},
+              )
+              if NOVA2:
+                  request["additionalModelRequestFields"] = {"reasoningConfig": {"type": "enabled", "maxReasoningEffort": "low"}}
+              try:
+                  try:
+                      r = bedrock.converse(**request)
+                  except ClientError as e:
+                      if "temperature" not in e.response["Error"].get("Message", ""):
+                          raise
+                      del request["inferenceConfig"]["temperature"]  # a model that sets its own
+                      r = bedrock.converse(**request)
+              except ClientError as e:
+                  code, message = e.response["Error"]["Code"], e.response["Error"].get("Message", "")
+                  print(json.dumps({"error": code, "message": message[:200]}))  # never the request: it holds personal details
+                  if code == "ValidationException" and "too long" in message.lower():
+                      return {"error": "too long"}
+                  return {"error": "busy" if code in ("ThrottlingException", "ServiceUnavailableException") else code}
+              usage = r.get("usage", {})
+              print(json.dumps({"stop": r["stopReason"], "in": usage.get("inputTokens"), "out": usage.get("outputTokens")}))
+              if r["stopReason"] == "max_tokens":
+                  return {"error": "answer cut off"}
+              for block in r["output"]["message"]["content"]:
+                  if "toolUse" in block:
+                      return {"answer": block["toolUse"]["input"], "model": MODEL}
+              return {"error": "no answer"}
+      Tags:
+        - Key: App
+          Value: !Ref AppTag
+
+  FormHelperLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/auto-applicator-form-helper
+      RetentionInDays: 30
+      Tags:
+        - Key: App
+          Value: !Ref AppTag
+
+  FormHelperRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: "Auto Applicator cloud AI: write its log and ask the one model, nothing else."
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { "aws:SourceAccount": !Ref AWS::AccountId }
+      Policies:
+        - PolicyName: write-log
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt FormHelperLogs.Arn
+        - PolicyName: ask-model
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Profile
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${HelperModel}"
+              - Sid: ModelThroughProfile  # the US regions the profile routes to, and only through it
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub
+                  - "arn:${AWS::Partition}:bedrock:us-*::foundation-model/${Model}"
+                  - Model: !Select [1, !Split ["us.", !Ref HelperModel]]
+                Condition:
+                  StringEquals:
+                    bedrock:InferenceProfileArn: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${HelperModel}"
+      Tags:
+        - Key: App
+          Value: !Ref AppTag
+
   # ---- Everything above, in one place in the console -----------------------------------------------------------
   AppResources:
     Type: AWS::ResourceGroups::Group
     Properties:
       Name: auto-applicator
-      Description: Everything the Auto Applicator cloud browser uses.
+      Description: Everything the Auto Applicator cloud browser and its cloud AI use.
       ResourceQuery:
         Type: TAG_FILTERS_1_0
         Query:
@@ -354,3 +498,7 @@ Outputs:
     Value: !GetAtt BrowserProfile.ProfileId
   ResourceGroup:
     Value: !Ref AppResources
+  HelperFunction:
+    Value: !Ref FormHelper
+  HelperModel:
+    Value: !Ref HelperModel

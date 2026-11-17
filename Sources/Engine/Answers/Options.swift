@@ -4,6 +4,9 @@ private let declineMarkers = ["decline", "prefer not", "not wish", "don't wish",
                               "choose not", "rather not", "not specified", "i don't want", "i do not want"]
 private let placeholder = Regex(#"^(-+\s*)?((please )?(select|choose|pick)\b.*|none selected|-+|\.\.\.)?(\s*-+)?$"#)
 
+/// An answer that declines to say ("Decline to self-identify", "Prefer not to say").
+public func isDecline(_ answer: String) -> Bool { let a = norm(answer); return declineMarkers.contains { a.contains($0) } }
+
 /// "Select…", "-- choose --" and empty options are not real answers.
 public func isPlaceholderOption(_ option: String) -> Bool { placeholder.fullMatch(norm(option)) }
 
@@ -32,10 +35,73 @@ public func matchOption(_ answer: String, _ options: [String]) -> String? {
     if declineMarkers.contains(where: { a.contains($0) }) {
         if let hit = opts.first(where: { o in declineMarkers.contains { norm(o).contains($0) } }) { return hit }
     }
+    if let state = usState(answer, byNorm) { return state }
+    if let country = countryAlias(answer, opts) { return country }
     if let close = Difflib.closeMatch(a, normOrder, cutoff: 0.85) { return byNorm[close] }
-    let contains = normOrder.filter { a.count >= 3 && ($0.contains(a) || a.contains($0)) }
+    // A list of places written "Town, County, State, Country" (Zoho's "Bellville, Austin, Texas, United States -
+    // 77418" for "Austin"): only a place whose own name is the answer, never a town in a county of that name.
+    let head = { (o: String) in norm(String(o.split(separator: ",").first ?? "")) }
+    let places = !answer.contains(",") && opts.filter({ $0.filter { $0 == "," }.count >= 2 }).count * 2 > opts.count
+    if places {
+        let named = opts.filter { head($0) == a }
+        return named.count == 1 ? named[0] : nil
+    }
+    // "United States" is not "United States Minor Outlying Islands".
+    let contains = normOrder.filter { a.count >= 3 && ($0.contains(a) || a.contains($0)) && !lookalikeCountry.matches($0) }
     if contains.count == 1 { return byNorm[contains[0]] }
     return nil
+}
+
+/// Names a country goes by in option lists ("USA", "United States of America", "U.S.").
+private let countryNames: [[String]] = [
+    ["united states", "united states of america", "usa", "us", "u s", "u s a", "america"],
+    ["united kingdom", "uk", "u k", "great britain", "britain", "gb", "united kingdom of great britain and northern ireland", "england"],
+    ["south korea", "korea south", "korea republic of", "republic of korea", "korea rep", "korea"],
+    ["russia", "russian federation"],
+    ["vietnam", "viet nam"],
+    ["czech republic", "czechia"],
+    ["netherlands", "the netherlands", "holland", "netherlands the"],
+    ["turkey", "turkiye", "türkiye"],
+    ["united arab emirates", "uae", "u a e"],
+    ["taiwan", "taiwan province of china", "taiwan roc", "republic of china taiwan"],
+    ["hong kong", "hong kong sar", "hong kong sar china", "hong kong china"],
+    ["iran", "iran islamic republic of"],
+    ["mexico", "méxico"],
+]
+
+/// Other places whose names hold a country's ("United States Minor Outlying Islands", "Virgin Islands, U.S.").
+private let lookalikeCountry = Regex(#"\b(minor outlying|virgin islands|outlying islands)\b|^korea,? (north|democratic)|^democratic people"#)
+
+/// "Japan (+81)", "+1 United States" → "japan", "united states".
+private func countryKey(_ s: String) -> String {
+    var k = s.lowercased().replacingOccurrences(of: #"\(?\+\s?\d[\d\s-]*\)?"#, with: " ", options: .regularExpression)
+    k = k.replacingOccurrences(of: #"[^\p{L}\s]"#, with: " ", options: .regularExpression)
+    return k.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+}
+
+/// A country written the other way: the profile's "United States" in a list that says "USA".
+private func countryAlias(_ answer: String, _ options: [String]) -> String? {
+    let key = countryKey(answer)
+    guard let names = countryNames.first(where: { $0.contains(key) }) else { return nil }
+    return options.first(where: { names.contains(countryKey($0)) })
+}
+
+/// A US state written the other way: the profile's "TX" in a list of names ("Texas", "TX - Texas"), or "Texas" in a
+/// list of codes. Never "Virginia" for "West Virginia".
+private func usState(_ answer: String, _ byNorm: [String: String]) -> String? {
+    let raw = answer.trimmed
+    let code: String, name: String
+    if raw.count == 2, let n = LinkedIn.usStates[raw.uppercased()] {
+        (code, name) = (raw.uppercased(), n)
+    } else if let hit = LinkedIn.usStates.first(where: { norm($0.value) == norm(raw) }) {
+        (code, name) = (hit.key, hit.value)
+    } else {
+        return nil
+    }
+    let c = NSRegularExpression.escapedPattern(for: code.lowercased()), n = NSRegularExpression.escapedPattern(for: norm(name))
+    let both = Regex("^(\\(?\(c)\\)?\\W+)?\(n)(\\W+\\(?\(c)\\)?)?$")
+    if let hit = byNorm[norm(name)] ?? byNorm[code.lowercased()] { return hit }
+    return byNorm.first(where: { both.matches($0.key) })?.value
 }
 
 private let rangePattern = Regex(#"(\d+(?:\.\d+)?)\s*(?:-|–|to)\s*(\d+(?:\.\d+)?)"#)

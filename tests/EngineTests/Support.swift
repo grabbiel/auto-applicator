@@ -48,8 +48,13 @@ final class FakeModel: LanguageModel, @unchecked Sendable {
     var evidence = "Backend engineer building Python services"
     var compact = false
     private(set) var calls: [[String]] = []          // labels per form call
+    private(set) var prompts: [String] = []          // every form call's prompt
+    var failure: Error?                              // thrown by every form call when set
     private(set) var feedback: [[String]] = []       // labels that came with a form error
     private(set) var coverLetters = 0
+    /// What to do on a stuck form (the cloud AI's rescue), from its prompt.
+    var ui: ((String) -> [String: Any])?
+    private(set) var uiPrompts: [String] = []
 
     init(_ table: [String: (String, Confidence)] = [:], feedback: [String: (String, Confidence)] = [:], default d: (String, Confidence) = ("", .low)) {
         self.table = table
@@ -66,7 +71,13 @@ final class FakeModel: LanguageModel, @unchecked Sendable {
             return ["evidence": "fake", "submitted": prompt.lowercased().contains("thank")]
         }
         if keys.contains("code") { return ["code": "", "verification_url": ""] }
+        if keys.contains("action") {
+            uiPrompts.append(prompt)
+            return ui?(prompt) ?? ["action": "stop", "element": -1, "fixes": [], "reason": "fake"]
+        }
         // form fields: lines like `field1: "Label" (type, required)` and an optional rejection note below
+        prompts.append(prompt)
+        if let failure { throw failure }
         var out: [String: Any] = [:]
         var labels: [String] = []
         var rejected: [String] = []
@@ -94,16 +105,34 @@ final class FakeModel: LanguageModel, @unchecked Sendable {
     }
 }
 
+/// The number the cloud AI's prompt gives a listed button ("[3] Onward › (link)"), or -1.
+func buttonNumber(_ prompt: String, _ name: String, nth: Int = 1) -> Int {
+    let lines = prompt.components(separatedBy: "BUTTONS:").last?.components(separatedBy: "\n") ?? []
+    var seen = 0
+    for line in lines {
+        guard let g = Regex(#"^\[(\d+)\] (.*) \((button|link)( \d+)?\)$"#, []).firstGroups(line), let n = g[1], let label = g[2] else { continue }
+        if label == name { seen += 1; if seen == nth { return Int(n) ?? -1 } }
+    }
+    return -1
+}
+
 /// An inbox held in memory.
 final class FakeMailbox: MailSession, @unchecked Sendable {
     var messages: [(uid: Int, raw: Data, seen: Bool)]
     var onRefresh: (() -> Void)?
+    /// When messages arrived (IMAP's INTERNALDATE); messages left out have no known time.
+    var arrived: [Int: Date] = [:]
+    private(set) var fetched: [Int] = []
 
     init(_ raws: [Data]) { messages = raws.enumerated().map { ($0.offset + 1, $0.element, false) } }
 
     func refresh() async throws { onRefresh?() }
     func uids(since date: Date) async throws -> [Int] { messages.map(\.uid).reversed() }
-    func fetch(uid: Int) async throws -> Data? { messages.first { $0.uid == uid }?.raw }
+    func arrivals(uids: [Int]) async throws -> [Int: Date] { arrived.filter { uids.contains($0.key) } }
+    func fetch(uid: Int) async throws -> Data? {
+        fetched.append(uid)
+        return messages.first { $0.uid == uid }?.raw
+    }
     func markSeen(uid: Int) async throws { if let i = messages.firstIndex(where: { $0.uid == uid }) { messages[i].seen = true } }
     func unseenCount() async throws -> Int { messages.filter { !$0.seen }.count }
     func close() {}

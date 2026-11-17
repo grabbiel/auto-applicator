@@ -87,7 +87,8 @@ public struct CachedAnswer: Identifiable, Equatable, Sendable {
     public var fieldType: String
     public var options: [String]
     public var answer: String
-    /// "user" (you answered), "edited" (you changed it), "profile", or "llm:high" / "llm:medium" (the AI decided).
+    /// "user" (you answered), "edited" (you changed it), "profile", "llm:high" / "llm:medium" (the on-device AI decided), or
+    /// "cloud:high" / "cloud:medium" (the cloud AI decided).
     public var source: String
     public var updatedAt: Date?
 
@@ -466,10 +467,21 @@ public final class Database: @unchecked Sendable {
     }
 
     /// A question waiting for the person that another application to `company` asked.
-    public func pendingQuestion(company: String) -> PendingQuestion? {
+    /// A question an application to this company waits on; with `seenSince`, only one a form asked since then.
+    public func pendingQuestion(company: String, seenSince: Date? = nil) -> PendingQuestion? {
         let c = company.trimmed.lowercased()
         guard !c.isEmpty else { return nil }
-        return listPending().first { $0.companies.contains { $0.trimmed.lowercased() == c } }
+        // Saved to the second.
+        let since = seenSince.map { Date(timeIntervalSince1970: floor($0.timeIntervalSince1970)) }
+        return listPending().first { q in
+            q.companies.contains { $0.trimmed.lowercased() == c } && since.map { (q.lastSeen ?? .distantPast) >= $0 } ?? true
+        }
+    }
+
+    /// The applications sent so far, as `JobRunner.applicationKey` names them.
+    public func appliedApplicationKeys() -> Set<String> {
+        Set(query("SELECT external_url FROM jobs WHERE status = ? AND external_url <> ''", [.text(JobStatus.applied.rawValue)]) { $0.string(0) }
+            .compactMap { JobRunner.applicationKey(URL(string: $0)) })
     }
 
     public func jobHasPending(_ jobID: String) -> Bool {

@@ -46,6 +46,9 @@ public final class AIService: FormAnswering, @unchecked Sendable {
     salary history, licenses, test scores.
     """
 
+    /// The on-device model's window holds about 4,000 tokens with the profile and the instructions.
+    public var maxOptionChars: Int { model.isCompact ? 5000 : .max }
+
     public func answerFields(_ fields: [FieldSpec], profileText: String, job: JobContext, feedback: [String: String],
                              memories: [String]) async throws -> [String: FieldAnswer] {
         let compact = model.isCompact

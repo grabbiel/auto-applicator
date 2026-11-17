@@ -102,6 +102,31 @@ final class EmailTests: XCTestCase {
         XCTAssertFalse(box.messages[1].seen)
     }
 
+    /// A busy inbox: yesterday's hundreds of messages aren't downloaded while waiting (that took longer than the
+    /// whole wait, so Workday's email was never read).
+    func testOnlyNewMailIsDownloaded() async {
+        let since = Date()
+        let old = (0..<300).map { _ in email("other", date: since.addingTimeInterval(-20000)) }
+        let box = FakeMailbox(old + [email("greenhouse")])
+        for uid in 1...300 { box.arrived[uid] = since.addingTimeInterval(-20000) }
+        box.arrived[301] = since.addingTimeInterval(5)
+        var secrets = Secrets()
+        (secrets.imapUser, secrets.imapPassword, secrets.imapHost) = ("jane@example.com", "x", "imap.example.com")
+        let verifier = EmailVerifier(secrets: secrets, ai: nil, pollInterval: 0.01, openSession: { _ in box })
+        let res = await verifier.waitForVerification(senderHint: "greenhouse", since: since, timeout: 2, kind: .code, codeLength: 8)
+        XCTAssertEqual(res?.code, "nE5Cx0Ky")
+        XCTAssertEqual(box.fetched, [301])
+    }
+
+    func testReadsWhenMailArrived() {
+        let lines = [#"* 12 FETCH (UID 345 INTERNALDATE " 6-Nov-2026 21:30:00 +0000")"#,
+                     #"* 13 FETCH (INTERNALDATE "16-Nov-2026 16:05:09 -0500" UID 346)"#, "* 14 FETCH (FLAGS (\\Seen))"]
+        let got = IMAPClient.arrivals(lines)
+        XCTAssertEqual(got.count, 2)
+        XCTAssertEqual(got[345]?.timeIntervalSince1970, ISO8601DateFormatter().date(from: "2026-11-06T21:30:00Z")?.timeIntervalSince1970)
+        XCTAssertEqual(got[346]?.timeIntervalSince1970, ISO8601DateFormatter().date(from: "2026-11-16T21:05:09Z")?.timeIntervalSince1970)
+    }
+
     /// A code the user already opened on their phone is still found (version 0.3 only searched unread mail).
     func testFindsAlreadyReadMessages() async {
         let box = FakeMailbox([email("six_digit")])

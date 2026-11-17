@@ -84,6 +84,7 @@ struct SettingsView: View {
             card("Your data", "externaldrive") {
                 Text(model.usesCloud
                      ? "Your profile, resume, answers and a PDF of every application stay on this Mac, in one folder. The cloud browser keeps only its cookies, in your AWS account."
+                        + (model.usesCloudHelper ? " The cloud AI keeps nothing: it answers and forgets." : "")
                      : "Everything stays on this Mac, in one folder: your profile, resume, answers and a PDF of every application.")
                     .fixedSize(horizontal: false, vertical: true)
                     .font(Typo.small).foregroundStyle(Palette.textSoft)
@@ -151,7 +152,9 @@ struct AIStatusView: View {
             case .checking:
                 HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Checking…").font(Typo.body) }
             case .ready(let name):
-                statusLine("checkmark.circle.fill", .green, "Ready: \(name)", "Runs privately on this Mac. Nothing you type is sent anywhere.")
+                statusLine("checkmark.circle.fill", .green, "Ready: \(name)", model.usesCloudHelper
+                           ? "Runs privately on this Mac. On runs in the cloud browser, what it can't answer goes to the cloud AI (Settings › Cloud browser)."
+                           : "Runs privately on this Mac. Nothing you type is sent anywhere.")
             case .needsSetup(let why):
                 statusLine("exclamationmark.circle.fill", .amber, "Not set up yet", why)
                 setupButtons

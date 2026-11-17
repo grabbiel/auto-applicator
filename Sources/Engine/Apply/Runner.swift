@@ -47,16 +47,26 @@ public final class JobRunner {
     let paths: AppPaths
     let web: WebAgent
     let ai: AIService?
+    /// The cloud AI, for questions the on-device AI couldn't answer (runs in the cloud browser only).
+    let helper: AIService?
     let db: Database
     let practice: Bool
     let onEvent: (RunEvent) -> Void
     private var summary: RunSummary
+    /// When this run began: a question waiting for the person holds back other jobs only once this run has seen a
+    /// form ask it (see `consider`).
+    private var startedAt = Date()
+    /// The company applications this run has opened (see `applicationKey`), with what came of each: another LinkedIn
+    /// posting of the same job (Mintive's twice, Haystack's three times) isn't gone through again.
+    private var opened: [String: (title: String, result: ApplyResult)] = [:]
 
-    public init(paths: AppPaths, db: Database, web: WebAgent, ai: AIService?, practice: Bool, onEvent: @escaping (RunEvent) -> Void) {
+    public init(paths: AppPaths, db: Database, web: WebAgent, ai: AIService?, helper: AIService? = nil, practice: Bool,
+                onEvent: @escaping (RunEvent) -> Void) {
         self.paths = paths
         self.db = db
         self.web = web
         self.ai = ai
+        self.helper = helper
         self.practice = practice
         self.onEvent = onEvent
         summary = RunSummary(practice: practice)
@@ -74,7 +84,10 @@ public final class JobRunner {
 
         onEvent(.phase("Checking your LinkedIn sign-in"))
         guard await web.linkedInSignedIn() else { throw RunError.signedOut }
-        if ai == nil { onEvent(.warning("The AI isn't available, so only questions it already knows will be answered.")) }
+        if ai == nil {
+            onEvent(.warning(helper == nil ? "The AI isn't available, so only questions it already knows will be answered."
+                : "The on-device AI isn't available, so new questions go to the cloud AI (\(helper!.displayName))."))
+        }
         // Without LinkedIn's number for the place, signed-in searches show jobs near the profile's location instead.
         let place = settings.search.location.trimmed
         let geoId = place.isEmpty ? nil : await web.linkedInGeoId(for: place)
@@ -89,9 +102,10 @@ public final class JobRunner {
             if forgotten > 0 { Log.info("The profile changed: forgot \(forgotten) answer(s) worked out from the old one") }
             db.setMeta("profile", fingerprint)
         }
-        let answerer = Answerer(profile: profile, db: db, ai: ai, batchSize: ai?.batchSize ?? 6)
+        let answerer = Answerer(profile: profile, db: db, ai: ai, helper: helper, batchSize: ai?.batchSize ?? 6)
         let verifier = EmailVerifier(secrets: secrets, ai: ai)
         let runID = db.startRun(practice: practice)
+        startedAt = Date()
         defer {
             db.finishRun(runID, sent: summary.sent, prepared: summary.prepared, needsAnswer: summary.needsAnswer, failed: summary.failed,
                          note: summary.note)
@@ -134,6 +148,32 @@ public final class JobRunner {
         return summary
     }
 
+    /// What another posting of the same application came to: sent (in this run or before) means never again; anything
+    /// else this run is said again rather than gone through again. Not counted in the run's totals.
+    private func sameApplication(_ key: String) -> ApplyResult? {
+        if let (title, first) = opened[key] {
+            if first.status == .applied { return ApplyResult(.skippedAlreadyApplied, notes: "Sent already through the “\(title.prefix(80))” posting.") }
+            return ApplyResult(first.status, notes: "The same application as the “\(title.prefix(80))” posting: \(first.notes)", evidence: first.evidence,
+                               externalURL: first.externalURL)
+        }
+        if db.appliedApplicationKeys().contains(key) { return ApplyResult(.skippedAlreadyApplied, notes: "You applied to this job through another posting.") }
+        return nil
+    }
+
+    /// One application however a posting links to it: the address without what only tracks the visit ("utm_source",
+    /// Haystack's "funnel_source"), keeping what names the job (machinele's "id=38813"). Nil for an address that names no
+    /// particular job (a careers home page different postings may share).
+    nonisolated static func applicationKey(_ url: URL?) -> String? {
+        guard let url, let c = URLComponents(url: url, resolvingAgainstBaseURL: false), let host = c.host?.lowercased() else { return nil }
+        let tracking = Regex(#"^(utm_.*|src|source|sourcetype|ref|refid|referrer|gh_src|gh_jid_src|funnel_source|share_id|codes|iis|iisn|_?ccid|trackingid|igbtracker|lang|hl|locale|domain|mode|from|_jsource|cmpid|ss|bid|vjk|amp;.*)$"#)
+        let kept = (c.queryItems ?? []).filter { !tracking.fullMatch($0.name.lowercased()) }
+            .map { "\($0.name.lowercased())=\($0.value ?? "")" }.sorted()
+        let key = host.replacingOccurrences(of: "www.", with: "") + c.path.lowercased() + (kept.isEmpty ? "" : "?" + kept.joined(separator: "&"))
+        // A job number or an ID in it.
+        guard Regex(#"\d{4,}|[0-9a-f]{8}-[0-9a-f]{4}|[a-z]\d{5,}"#).matches(key) else { return nil }
+        return key
+    }
+
     private func quotaReached(_ settings: Settings) -> Bool {
         summary.sent + summary.prepared >= settings.limits.maxAppliesPerRun
     }
@@ -153,7 +193,10 @@ public final class JobRunner {
         onEvent(.jobStarted(card))
         // Another application to this company waits for the person's answer, and this one would most likely ask it
         // too: it waits with it instead of going through the company's site again (TCS asked four times for a PAN).
-        if let waiting = db.pendingQuestion(company: card.company) {
+        // Only once a form has asked it in this run: one from an earlier run may come from an older version of the app
+        // that read the form wrong (machinele's boxes all read "Message" until their labels were fixed), so the site
+        // is looked at again first.
+        if let waiting = db.pendingQuestion(company: card.company, seenSince: startedAt) {
             db.addPending(waiting.hash, question: waiting.question, fieldType: waiting.fieldType, options: waiting.options, jobID: card.id,
                           company: card.company)
             let result = ApplyResult(.needsAnswer, notes: "Waits for your answer to “\(waiting.question.prefix(200))”, which another \(card.company) application asked.")
@@ -165,6 +208,8 @@ public final class JobRunner {
         }
         var ats: ATSType?
         var result: ApplyResult
+        var landing: String?
+        var duplicate = false
         do {
             let details = try await web.openJob(card)
             switch details.kind {
@@ -180,7 +225,7 @@ public final class JobRunner {
             case .easyApply, .external:
                 let job = JobContext(title: card.title, company: card.company, location: card.location, description: details.description)
                 let ctx = ApplyContext(jobID: card.id, job: job, settings: settings, paths: paths, profile: profile, db: db, answerer: answerer,
-                                       ai: ai, verifier: verifier, secrets: secrets, practice: practice) { [weak self] in self?.onEvent(.step($0)) }
+                                       ai: ai, verifier: verifier, secrets: secrets, practice: practice, helper: helper) { [weak self] in self?.onEvent(.step($0)) }
                 if details.kind == .easyApply {
                     ats = .easyApply
                     result = try await EasyApplyHandler(web: web, ctx: ctx).apply()
@@ -188,6 +233,15 @@ public final class JobRunner {
                     onEvent(.step("Opening the company's site"))
                     try await web.openExternalApplication()
                     Log.info("LinkedIn's Apply opened \(web.url?.absoluteString.prefix(300) ?? "nothing")")
+                    landing = Self.applicationKey(web.url)
+                    if let landing, let same = sameApplication(landing) {
+                        Log.info("\(card.company): the same application as another posting (\(same.notes.prefix(120)))")
+                        duplicate = true
+                        db.upsertJob(card.id, status: same.status, title: card.title, company: card.company, location: card.location,
+                                     url: card.url.absoluteString, externalURL: web.url?.absoluteString, notes: same.notes)
+                        onEvent(.jobFinished(card, nil, same))
+                        return
+                    }
                     var reach = try await SiteRouter.reachApplication(web, step: { [weak self] in self?.onEvent(.step($0)) })
                     // A careers site that opened in another country's version (TCS's India site asks for an Indian tax
                     // ID): its version for the job's country.
@@ -225,6 +279,7 @@ public final class JobRunner {
         db.upsertJob(card.id, status: result.status, title: card.title, company: card.company, location: card.location, ats: ats,
                      url: card.url.absoluteString, externalURL: result.externalURL, notes: result.notes, evidence: result.evidence?.path,
                      countAttempt: result.status.isFailure)
+        if let landing, !duplicate { opened[landing] = (card.title, result) }
         switch result.status {
         case .applied: summary.sent += 1
         case .practiceComplete: summary.prepared += 1
