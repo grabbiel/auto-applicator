@@ -82,6 +82,8 @@ class FormTests: XCTestCase {
         }
         let resume = FileManager.default.temporaryDirectory.appendingPathComponent("resume.pdf")
         try Data("%PDF-1.4".utf8).write(to: resume)
+        // The page drew the box again since it was read (Greenhouse's at HubSpot): found again by its id.
+        _ = try await web.js("const r = document.getElementById('resume'); const n = r.cloneNode(); r.replaceWith(n); return n.hasAttribute('data-auto-id') && n.removeAttribute('data-auto-id');")
         let uploaded = await web.upload(f("Resume/CV *"), resume)
         XCTAssertTrue(uploaded)
 
@@ -423,6 +425,20 @@ class FormTests: XCTestCase {
         XCTAssertEqual(Array(errors.values), ["The file could not be uploaded"])
     }
 
+    /// Workday puts a box's message apart from its field and points to it: the message itself, not "invalid or required".
+    func testTheMessageABoxPointsTo() async throws {
+        try await web.loadTestHTML("""
+            <form>
+              <div data-automation-id="formField-email"><label for="e">Email*</label>
+                <input id="e" aria-invalid="true" aria-describedby="error1-e" value="jane.doe@example.com"></div>
+              <div><p id="error1-e">Error: The email address you entered is invalid. Enter a valid email address.</p></div>
+            </form>
+            """, base: URL(string: "https://example.wd5.myworkdayjobs.com/apply")!)
+        _ = await web.extractFields()
+        let errors = await web.collectErrors()
+        XCTAssertEqual(Array(errors.values), ["The email address you entered is invalid. Enter a valid email address."])
+    }
+
     /// "Continue with GitHub" (IBM's sign-in) is never the form's Continue; Amazon's "Skip & continue" is.
     func testNeverPressesSocialSignInButtons() async throws {
         try await web.loadTestHTML("""
@@ -576,8 +592,10 @@ class FormTests: XCTestCase {
 
     /// Adobe puts its consent statements in one fieldset (legend "usConsent"): each is its own checkbox, so the
     /// required ones get ticked and the text-message one doesn't. A real "pick any" group stays one question.
+    /// The fieldset's id names consent, like a cookie banner's, but it's in the form, so it isn't left out.
     func testSeparateStatementsInOneBoxAreSeparateCheckboxes() async throws {
         try await web.loadTestHTML("""
+            <div id="consent-banner" style="position:fixed;bottom:0"><label><input type="checkbox" id="ads"> Advertising cookies</label></div>
             <form>
             <fieldset id="usConsentObject"><legend role="heading">usConsent</legend>
               <div class="field-boolean"><label><input type="checkbox" id="mail" required aria-required="true"><span>*</span><span>The company may keep me informed with personalized emails about employment opportunities.</span></label></div>
@@ -589,7 +607,7 @@ class FormTests: XCTestCase {
               <label><input type="checkbox" name="langs" value="en"> English</label><label><input type="checkbox" name="langs" value="es"> Spanish</label></fieldset>
             </form>
             """, base: URL(string: "https://example.test/consent")!)
-        let fields = await web.extractFields()
+        let fields = await web.extractFields(root: nil, exclude: ApplicationHandler.exclude)
         XCTAssertEqual(fields.filter { $0.kind == .checkbox }.count, 4, fields.map(\.spec.label).joined(separator: " | "))
         XCTAssertEqual(fields.filter { $0.kind == .checkboxGroup }.map(\.spec.label), ["Which languages do you speak?"])
         let home = try TestHome()
@@ -685,6 +703,299 @@ extension FormTests {
         XCTAssertEqual(errors[fields[1].id] != nil, true, "\(errors)")
     }
 
+    /// Greenhouse's list that takes several choices shows each as a chip beside its (empty) box: the chip is its value,
+    /// so a choice that took isn't "didn't take" (Coursera's "Have you ever been employed by Coursera or Udemy?").
+    func testAListWhoseChoicesAreChips() async throws {
+        try await web.loadTestHTML("""
+            <form>
+              <label id="q-label" for="q[]">Have you ever been employed by Coursera or Udemy?*</label>
+              <div class="select__container"><div class="select__control">
+                <div class="select__value-container select__value-container--is-multi">
+                  <div class="select__input-container"><input id="q[]" class="select__input" role="combobox" aria-labelledby="q-label"
+                    aria-required="true" aria-autocomplete="list" aria-expanded="false" aria-controls="menu" value=""></div></div></div>
+                <div id="menu" role="listbox" style="display:none">
+                  <div role="option" onclick="pick(this)">Yes, I have previously been employed by Coursera</div>
+                  <div role="option" onclick="pick(this)">No, I have not previously been employed by Coursera or Udemy</div></div></div>
+            </form>
+            <script>
+              const box = document.getElementById('q[]'), menu = document.getElementById('menu');
+              const open = () => { menu.style.display = 'block'; box.setAttribute('aria-expanded', 'true'); };
+              box.addEventListener('focus', open); box.addEventListener('mousedown', open);
+              function pick(o) {
+                const chip = document.createElement('div'); chip.className = 'select__multi-value';
+                chip.innerHTML = '<div class="select__multi-value__label">' + o.innerText + '</div><div role="button" class="select__multi-value__remove" aria-label="Remove ' + o.innerText + '">x</div>';
+                box.parentNode.before(chip); menu.style.display = 'none'; box.setAttribute('aria-expanded', 'false'); box.value = '';
+              }
+            </script>
+            """, base: URL(string: "https://job-boards.greenhouse.io/coursera/jobs/1")!)
+        let before = await web.extractFields()
+        let field = try XCTUnwrap(before.first { $0.kind == .combobox })
+        XCTAssertGreaterThan(field.spec.maxChoices, 1)
+        XCTAssertEqual(field.spec.currentValue, "")
+        let answer = "No, I have not previously been employed by Coursera or Udemy"
+        let filled = await web.fill(field, answer)
+        XCTAssertTrue(filled)
+        let now = await web.extractFields(readOptions: false)
+        let after = try XCTUnwrap(now.first { $0.kind == .combobox })
+        XCTAssertEqual(after.spec.currentValue, answer)
+    }
+
+    /// Dropbox's Company: a Tom Select search box over a hidden list, which looks names up as you type and offers
+    /// "Add Acme Corp…" for one it doesn't know. The name is added; the hidden list isn't another question.
+    func testASearchBoxThatAddsANameItDoesntKnow() async throws {
+        try await web.loadTestHTML("""
+            <style>.ts-hidden-accessible { border: 0; clip: rect(0 0 0 0); height: 1px; overflow: hidden; padding: 0; position: absolute; width: 1px; }</style>
+            <form><div class="form-group">
+              <label for="work_company_1-ts-control" id="work_company_1-ts-label">Company *</label>
+              <select id="work_company_1" name="work_company_1" required class="form-select tomselected ts-hidden-accessible" tabindex="-1">
+                <option value="">Please Select</option></select>
+              <div class="ts-wrapper single"><div class="ts-control">
+                <input type="text" id="work_company_1-ts-control" role="combobox" aria-haspopup="listbox" aria-expanded="false"
+                  aria-controls="work_company_1-ts-dropdown" aria-labelledby="work_company_1-ts-label" placeholder="Type your company name..." autocomplete="off"></div>
+                <div class="ts-dropdown single" style="display:none"><div role="listbox" id="work_company_1-ts-dropdown" class="ts-dropdown-content"></div></div></div>
+            </div></form>
+            <script>
+              const box = document.getElementById('work_company_1-ts-control'), sel = document.getElementById('work_company_1');
+              const control = box.parentNode, dd = document.querySelector('.ts-dropdown'), content = document.getElementById('work_company_1-ts-dropdown');
+              const open = () => { dd.style.display = 'block'; box.setAttribute('aria-expanded', 'true'); };
+              const close = () => { dd.style.display = 'none'; box.setAttribute('aria-expanded', 'false'); };
+              box.addEventListener('focus', open); box.addEventListener('mousedown', open);
+              box.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
+              box.addEventListener('input', () => {
+                const q = box.value.trim(); content.innerHTML = ''; open();
+                if (q.length < 2) return;
+                // The server knows no company by this name: only the row that adds it.
+                setTimeout(() => {
+                  if (box.value.trim() !== q) return;
+                  content.innerHTML = '<div class="create active" data-selectable="">Add <strong>' + q + '</strong>&hellip;</div>';
+                  content.firstChild.addEventListener('click', () => add(q));
+                }, 300);
+              });
+              function add(v) {
+                sel.add(new Option(v, v, true, true));
+                control.querySelectorAll('.item').forEach(i => i.remove());
+                const item = document.createElement('div'); item.className = 'item'; item.dataset.value = v; item.textContent = v;
+                control.insertBefore(item, box); box.value = ''; content.innerHTML = ''; close();
+              }
+            </script>
+            """, base: URL(string: "https://www.dropbox.jobs/en/jobs/apply/?id=1")!)
+        let before = await web.extractFields()
+        XCTAssertEqual(before.map(\.spec.label), ["Company *"], "the hidden list isn't a question of its own")
+        let field = try XCTUnwrap(before.first)
+        XCTAssertEqual(field.kind, .combobox)
+        let filled = await web.fill(field, "Acme Corp")
+        XCTAssertTrue(filled)
+        let chosen = try await web.js("return document.getElementById('work_company_1').value") as? String
+        XCTAssertEqual(chosen, "Acme Corp")
+        let after = await web.extractFields(readOptions: false)
+        XCTAssertEqual(after.first?.spec.currentValue, "Acme Corp")
+        XCTAssertTrue(WebAgent.addsTyped("Add Acme Corp…", "Acme Corp"))
+        XCTAssertTrue(WebAgent.addsTyped("Create “New Balance”", "New Balance"))
+        XCTAssertFalse(WebAgent.addsTyped("Acme Corporation", "Acme Corp"))
+    }
+
+    /// Fidelity's job page: a short form that starts the application ("Start Application"), with "Sign up for job
+    /// alerts" after it. The job-alert sign-up is never the button pressed, though "sign up" names a way on.
+    func testAJobAlertSignUpIsNeverTheNextButton() async throws {
+        try await web.loadTestHTML("""
+            <form id="preApplicationForm"><label for="fn">First name:</label><input id="fn" required>
+            <label><input type="checkbox" required> I Accept</label><button type="button">Start Application</button></form>
+            <aside><a href="https://talent.example.test/flows/talent-community">Sign up for job alerts (Opens In new window)</a>
+            <button type="button">Join our talent community</button></aside>
+            """, base: URL(string: "https://jobs.example.test/en/jobs/1/")!)
+        let next = await web.findButton(nextPattern)
+        XCTAssertEqual(next, "Start Application")
+        let signUp = await web.findButton(#"^sign ?up"#)
+        XCTAssertNil(signUp)
+    }
+
+    /// NextEra's job page: "JOIN OUR TEAM" in the header goes to the careers home, not on with an application. A
+    /// plain "Join" still does (a sign-up's).
+    func testJoinOurTeamInTheHeaderIsNeverTheNextButton() async throws {
+        try await web.loadTestHTML("""
+            <header><nav><a href="/">JOIN OUR TEAM</a><a href="/life">LIFE AT NEXTERA ENERGY</a></nav></header>
+            <main><h1>Sr Software Development Eng</h1><a href="#">Join us</a></main>
+            """, base: URL(string: "https://jobs.example.test/job/1/")!)
+        let none = await web.findButton(nextPattern)
+        XCTAssertNil(none)
+        try await web.loadTestHTML("<form><input type=email required><button type=button>Join</button></form>", base: URL(string: "https://jobs.example.test/join")!)
+        let join = await web.findButton(nextPattern)
+        XCTAssertEqual(join, "Join")
+    }
+
+    /// Pinpoint's "1. Personal Details" fieldset: its legend heads the name, phone and address boxes, so it's none of
+    /// their questions. The address boxes are named by their placeholders ("Address Line 1") and Country by the label
+    /// beside its list; a fieldset holding one box still takes its legend as the question.
+    func testASectionsLegendIsntEachBoxsQuestion() async throws {
+        try await web.loadTestHTML("""
+            <form><fieldset><legend>1.Personal Details We'll need these details in order to be able to contact you. Apply with LinkedIn</legend>
+              <div><label for="fn">First Name</label><input id="fn" required></div>
+              <div class="col" id="address-country"><label class="external-form__label">Country</label>
+                <div class="react-select"><div class="react-select__control"><div class="react-select__value-container">
+                  <div class="react-select__single-value">Peru</div>
+                  <div class="react-select__input-container"><input id="country" role="combobox" aria-haspopup="true" aria-expanded="false" value=""></div>
+                </div></div><input required aria-hidden="true" tabindex="-1" value="" style="opacity:0;position:absolute;left:0;bottom:0;width:100%"></div>
+                <select style="display:none"><option>Select...</option><option>Peru</option><option>United States</option></select></div>
+              <div class="col" id="address-state"><label class="external-form__label">State</label>
+                <div class="react-select"><div class="react-select__control"><div class="react-select__value-container">
+                  <div class="react-select__placeholder">Select...</div>
+                  <div class="react-select__input-container"><input id="state" role="combobox" aria-haspopup="true" aria-expanded="false" value=""></div>
+                </div></div></div></div>
+              <div class="row"><div class="col"><input name="address1" placeholder="Address Line 1" required></div>
+                <div class="col"><input name="address2" placeholder="Address Line 2"></div>
+                <div class="col"><input name="city" placeholder="City" required></div></div>
+            </fieldset>
+            <fieldset><legend>How did you hear about us?</legend><input name="source"></fieldset></form>
+            """, base: URL(string: "https://acme.example.test/en/postings/1/applications/new")!)
+        let fields = await web.extractFields(root: nil, exclude: ApplicationHandler.exclude)
+        XCTAssertEqual(fields.map(\.spec.label), ["First Name", "Country", "State", "Address Line 1", "Address Line 2", "City", "How did you hear about us?"])
+        // Each list's own choice: State shows none, not Country's "Peru" beside it.
+        XCTAssertEqual(fields.filter { $0.kind == .combobox }.map(\.spec.currentValue), ["Peru", ""])
+    }
+
+    /// Breezy's form: a section heading over boxes named only by their placeholders, and work-history dates named by
+    /// the words just before them (their placeholders say "Company", which a date box never shows). The phone box once
+    /// got the name, its question read as "Full Name".
+    func testBreezysBoxesNamedByPlaceholdersAndTheWordsBefore() async throws {
+        try await web.loadTestHTML("""
+            <form><div class="section"><div class="section-header"><h2>Personal Details</h2></div>
+              <h3><span>Full Name</span><span class="required" title="Required">*</span></h3>
+              <input required placeholder="Full Name" type="text" name="cName">
+              <input required placeholder="Email Address" type="email" name="cEmail">
+              <input placeholder="Phone Number" type="text" name="cPhoneNumber"></div>
+            <div class="section"><h2>Work History</h2><ul><li class="experience">
+              <input placeholder="Company" type="text"><div></div><input placeholder="Title" type="text"><div></div>
+              <textarea placeholder="Summary"></textarea><div></div>
+              <span>Start date</span><input placeholder="Company" type="date"><div></div>
+              <span>End date</span><input placeholder="Company" type="date"><div></div><a href="">Delete</a></li></ul></div></form>
+            """, base: URL(string: "https://acme.breezy.example.test/p/1-engineer/apply")!)
+        let labels = await web.extractFields(root: nil, exclude: ApplicationHandler.exclude).map(\.spec.label)
+        XCTAssertEqual(labels, ["Full Name*", "Email Address", "Phone Number", "Company", "Title", "Summary", "Start date", "End date"])
+    }
+
+    /// machinele's form names each box in a span beside the box's own span, and its only other words are the
+    /// "Message" heading under the boxes (which every box was once named after); an old table form names them in the
+    /// cell before. Not the words before a wrapper that has words of its own, nor a heading over a box that names itself.
+    func testWordsBeforeTheBoxsOwnWrapper() async throws {
+        try await web.loadTestHTML("""
+            <form><ul>
+              <li><span class="leftr">*Applicant Full Name</span> <span class="rightr"> <input type="text" name="r_name" required> </span></li>
+              <li><span class="leftr">*Email</span> <span class="rightr"> <input type="email" name="r_email" required> </span></li>
+              <li><span class="leftr">*Work Authorization</span> <span class="leftr"> <select name="work_auto" required>
+                <option value="">-------</option><option>US Citizen</option><option>H-1B</option></select> </span></li>
+            </ul>
+            <table><tr><td>Present Location</td><td><input type="text" name="location"></td></tr></table>
+            <p>Tell us where to reach you.</p><div>Nickname <input type="text" name="nick"></div>
+            <h4>Contact</h4><div><input type="text" placeholder="Alternate email" name="alt"></div>
+            <div><h3 style="text-align:center">Message</h3><textarea name="msg"></textarea></div>
+            <div class="iabb"><input type="checkbox" required><b>I agree to the Terms of Service and Privacy Policy.</b></div></form>
+            """, base: URL(string: "https://machinele.example.test/apply_now?id=1")!)
+        let labels = await web.extractFields(root: nil, exclude: ApplicationHandler.exclude).map(\.spec.label)
+        XCTAssertEqual(labels.prefix(4), ["*Applicant Full Name", "*Email", "*Work Authorization", "Present Location"])
+        XCTAssertEqual(labels[4], "Nickname")
+        XCTAssertEqual(labels.suffix(3), ["Alternate email", "Message", "I agree to the Terms of Service and Privacy Policy."])
+    }
+
+    /// Saransh's Easy Apply: its month and year lists under "From", sent empty once, came back named "This field is
+    /// required" (the person was asked that). A form's complaint is never a box's question; lists whose first choice
+    /// is "Month" or "Year" are a date's parts, named by the date's question.
+    func testAnErrorMessageIsNeverTheQuestion() async throws {
+        let months = (["Month"] + ["January", "February", "March"]).map { "<option>\($0)</option>" }.joined()
+        let years = (["Year"] + ["2024", "2023", "2022"]).map { "<option>\($0)</option>" }.joined()
+        try await web.loadTestHTML("""
+            <form>
+              <div class="fb-dash-form-element"><fieldset><legend><span class="fb-dash-form-element__label">From</span></legend>
+                <div class="date"><select id="m1" required>\(months)</select><select id="y1" required>\(years)</select></div></fieldset>
+                <div class="artdeco-inline-feedback artdeco-inline-feedback--error" role="alert">
+                  <span class="artdeco-inline-feedback__message">This field is required</span></div></div>
+              <div class="row"><div><p>This field is required</p><select id="lone" required><option>Select</option><option>A</option><option>B</option></select></div></div>
+              <div><span>Company</span><div class="artdeco-inline-feedback artdeco-inline-feedback--error">This field is required</div><input id="co" required></div>
+            </form>
+            """, base: URL(string: "https://www.linkedin.example.test/jobs/view/1/")!)
+        let labels = await web.extractFields(root: nil, exclude: ApplicationHandler.exclude).map(\.spec.label)
+        XCTAssertEqual(labels.count, 4, "\(labels)")
+        XCTAssertEqual(labels.prefix(2), ["From (month)", "From (year)"])
+        XCTAssertFalse(labels.contains { $0.lowercased().contains("required") }, "\(labels)")
+        XCTAssertEqual(labels.last, "Company")
+    }
+
+    /// A WebKit call that never answers (twonice's page once held a whole run that way) ends after its time limit, with
+    /// the fallback; an answer that comes in time is kept, and one that comes late is ignored.
+    func testABrowserCallThatNeverAnswersEnds() async throws {
+        let started = Date()
+        let never = await WebAgent.callback(within: 0.5, orElse: "gave up") { (_: @escaping (String) -> Void) in }
+        XCTAssertEqual(never, "gave up")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+        let quick = await WebAgent.callback(within: 5, orElse: "gave up") { done in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { done("answered") }
+        }
+        XCTAssertEqual(quick, "answered")
+        let late = await WebAgent.callback(within: 0.2, orElse: "gave up") { done in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { done("late") }
+        }
+        XCTAssertEqual(late, "gave up")
+        try await Task.sleep(nanoseconds: 700_000_000)  // the late answer arrives and is ignored (no second resume)
+    }
+
+    /// careers-page.com: its terms box is Radix's (a button role=checkbox, with a hidden copy of the box just after it),
+    /// read and ticked through the button; the hidden "menu-toggle" tick box beside the site's navigation is no question.
+    func testARadixTickBoxAndAMenuToggle() async throws {
+        try await web.loadTestHTML("""
+            <body><div id="menu-wrapper"><input type="checkbox" id="menu-toggle" class="menu-toggle" style="display:none">
+              <label for="menu-toggle">☰</label><nav><a href="/">Company website</a> <a href="/about/">About us</a> <a href="/login">Login</a></nav></div>
+            <form><label for="n">What is your full name?*</label><input id="n" required>
+            <div class="flex"><button type="button" role="checkbox" aria-checked="false" data-state="unchecked" value="on" style="width:20px;height:20px"></button><input
+              aria-hidden="true" tabindex="-1" type="checkbox" value="on" style="position:absolute;pointer-events:none;opacity:0;margin:0;transform:translateX(-100%);width:20px;height:20px"><span>I agree to the Terms and Privacy Policy *</span></div>
+            <button type="submit" disabled>Apply now</button></form>
+            <script>
+            const b = document.querySelector('button[role=checkbox]'), copy = b.nextElementSibling;
+            b.addEventListener('click', () => { const on = b.getAttribute('aria-checked') !== 'true'; b.setAttribute('aria-checked', String(on));
+              b.dataset.state = on ? 'checked' : 'unchecked'; copy.checked = on; document.querySelector('[type=submit]').disabled = !on; });
+            </script></body>
+            """, base: URL(string: "https://acme.careers-page.example.test/jobs/1/apply")!)
+        let fields = await web.extractFields(root: nil, exclude: ApplicationHandler.exclude)
+        XCTAssertEqual(fields.map(\.spec.label), ["What is your full name?*", "I agree to the Terms and Privacy Policy *"])
+        let ok = await web.fill(fields[1], "Yes")
+        XCTAssertTrue(ok)
+        let on = try await web.js("return document.querySelector('button[role=checkbox]').getAttribute('aria-checked')", world: .page) as? String
+        XCTAssertEqual(on, "true")
+    }
+
+    /// Dropbox's school search: a school it doesn't list is "Other", as its question says; the question is still "School
+    /// name" for the profile.
+    func testOtherWhenTheSchoolIsntListed() async throws {
+        try await web.loadTestHTML("""
+            <form><div class="form-group"><label for="s" id="sl">School name (type to find; select “Other” if not listed) *</label>
+              <input id="s" role="combobox" aria-controls="sd" aria-expanded="false" aria-labelledby="sl" autocomplete="off">
+              <div role="listbox" id="sd" style="display:none"></div></div></form>
+            <script>
+              const box = document.getElementById('s'), list = document.getElementById('sd');
+              const schools = ['Harvard University', 'Other', 'Rice University'];
+              box.addEventListener('input', () => {
+                const q = box.value.trim().toLowerCase(); list.innerHTML = '';
+                if (q.length < 2) return;
+                setTimeout(() => {
+                  for (const n of schools.filter(n => n.toLowerCase().includes(q))) {
+                    const o = document.createElement('div'); o.setAttribute('role', 'option'); o.textContent = n;
+                    o.addEventListener('click', () => { box.value = n; list.style.display = 'none'; box.setAttribute('aria-expanded', 'false'); });
+                    list.appendChild(o);
+                  }
+                  list.style.display = list.children.length ? 'block' : 'none'; box.setAttribute('aria-expanded', String(!!list.children.length));
+                }, 200);
+              });
+            </script>
+            """, base: URL(string: "https://www.dropbox.jobs/en/jobs/apply/?id=1")!)
+        let found = await web.extractFields()
+        let field = try XCTUnwrap(found.first)
+        let filled = await web.fill(field, "University of Nowhere")
+        XCTAssertTrue(filled)
+        let value = try await web.js("return document.getElementById('s').value") as? String
+        XCTAssertEqual(value, "Other")
+        var p = Fixture.profile
+        p.education[0].school = "Rice University"
+        XCTAssertEqual(ProfileRules.answer(p, FieldSpec(id: "s", label: field.spec.label, type: .combobox)), "Rice University")
+    }
+
     /// A box that becomes the browser's date picker once it has the focus takes 2026-12-13, not 12/13/2026.
     func testDateBoxThatTakesOnlyTheISOForm() async throws {
         try await web.loadTestHTML("""
@@ -723,6 +1034,176 @@ extension FormTests {
         XCTAssertEqual(fields.map(\.spec.label), ["Résumé", "Are you legally authorized to work in the United States?",
                                                   "To be considered, please pick the opposite of Yes."])
         XCTAssertEqual(fields.first?.fileKind, "resume")
+    }
+
+    /// Rippling's text-message question: each choice is a role=radio block people press, with the real radio hidden
+    /// inside it (aria-hidden, not shown). Its Apply stays off until one is picked; the texts are declined.
+    func testHiddenRadiosInsideTheChoicesPeoplePress() async throws {
+        try await web.loadTestHTML("""
+            <form onsubmit="return false">
+              <div><div><div><p>Check Yes or No to indicate your agreement to receive text message updates from Acme regarding your job application.</p></div></div>
+                <div data-testid="field"><div id="g" role="radiogroup">
+                  <div role="radio" data-value="true" tabindex="0" aria-labelledby="l1" aria-checked="false" style="display:flex">
+                    <div style="width:20px;height:20px"><input type="radio" aria-hidden="true" tabindex="-1" value="true" name="sms_opt_in" style="display:none"></div>
+                    <div id="l1"><p>Yes - I consent to receiving text messages</p></div></div>
+                  <div role="radio" data-value="false" tabindex="-1" aria-labelledby="l2" aria-checked="false" style="display:flex">
+                    <div style="width:20px;height:20px"><input type="radio" aria-hidden="true" tabindex="-1" value="false" name="sms_opt_in" style="display:none"></div>
+                    <div id="l2"><p>No - I do not consent to receiving text messages</p></div></div>
+                </div></div></div>
+              <button type="submit" aria-disabled="true">Apply</button>
+            </form>
+            <script>
+              // Pressing a choice marks it (as React does) without touching the hidden radio.
+              document.querySelectorAll('[role=radio]').forEach(r => r.addEventListener('click', () =>
+                document.querySelectorAll('[role=radio]').forEach(o => o.setAttribute('aria-checked', String(o === r)))));
+            </script>
+            """, base: URL(string: "https://ats.rippling.com/acme/jobs/1/apply")!)
+        let fields = await web.extractFields(readOptions: false)
+        let field = try XCTUnwrap(fields.first { $0.kind == .radio }, "\(fields.map(\.spec.label))")
+        XCTAssertTrue(field.spec.label.hasPrefix("Check Yes or No to indicate your agreement to receive text message"), field.spec.label)
+        XCTAssertEqual(field.spec.options, ["Yes - I consent to receiving text messages", "No - I do not consent to receiving text messages"])
+        let home = try TestHome()
+        let answerer = Answerer(profile: Fixture.profile, db: home.db, ai: nil)
+        let res = await answerer.resolve([field.spec], job: Fixture.job)
+        let answer = try XCTUnwrap(res.answers[field.spec.id])
+        XCTAssertEqual(answer, "No - I do not consent to receiving text messages")
+        let filled = await web.fill(field, answer)
+        XCTAssertTrue(filled)
+        let marked = try await web.js("return [...document.querySelectorAll('[role=radio]')].map(r => r.getAttribute('aria-checked')).join(',')") as? String
+        XCTAssertEqual(marked, "false,true")
+        let again = await web.extractFields(readOptions: false)
+        XCTAssertEqual(again.first { $0.kind == .radio }?.spec.currentValue, "No - I do not consent to receiving text messages")
+    }
+
+    /// Rippling's "Earliest available start date" as three boxes named only "month", "day" and "year", its question
+    /// far above them: each is named after the question, and gets its part of the date.
+    func testADateInThreeBoxes() async throws {
+        try await web.loadTestHTML("""
+            <form onsubmit="return false">
+              <div><div><div><p>Earliest available start date</p></div></div>
+                <div data-testid="field"><div><div data-testid="customQuestions.1"><div><div id="f59" data-title="Date"><div><span aria-hidden="true"></span><div>
+                  <div data-testid="month"><input id="m" aria-required="true" maxlength="2" placeholder="MM" aria-label="month" role="spinbutton"></div><p>/</p>
+                  <div data-testid="day"><input id="d" aria-required="true" maxlength="2" placeholder="DD" aria-label="day" role="spinbutton"></div><p>/</p>
+                  <div data-testid="year"><input id="y" aria-required="true" maxlength="4" placeholder="YYYY" aria-label="year" role="spinbutton"></div>
+                </div></div></div></div></div></div></div></div>
+              <div data-testid="field"><label for="o">Other question</label><input id="o"></div>
+            </form>
+            """, base: URL(string: "https://ats.rippling.com/acme/jobs/1/apply")!)
+        let fields = await web.extractFields(readOptions: false)
+        XCTAssertEqual(fields.map(\.spec.label), ["Earliest available start date (month)", "Earliest available start date (day)",
+                                                  "Earliest available start date (year)", "Other question"])
+        let home = try TestHome()
+        let answerer = Answerer(profile: Fixture.profile, db: home.db, ai: nil)
+        let res = await answerer.resolve(Array(fields.prefix(3)).map(\.spec), job: Fixture.job)
+        let start = Calendar(identifier: .gregorian).date(byAdding: .day, value: 14, to: Date())!
+        let c = Calendar(identifier: .gregorian).dateComponents([.year, .month, .day], from: start)
+        XCTAssertEqual(fields.prefix(3).map { res.answers[$0.spec.id] ?? "-" },
+                       [String(format: "%02d", c.month!), String(format: "%02d", c.day!), String(c.year!)])
+
+        // Like Rippling's, each box keeps only what's typed: a value set by script is undone when it redraws.
+        _ = try await web.js("""
+            for (const el of document.querySelectorAll('[role=spinbutton]')) {
+              let kept = '';
+              el.addEventListener('keydown', e => {
+                if (/^[0-9]$/.test(e.key)) { e.preventDefault(); kept = (el.selectionStart === 0 && el.selectionEnd === el.value.length ? '' : kept) + e.key;
+                  kept = kept.slice(-el.maxLength); el.value = kept; }
+              });
+              el.addEventListener('input', () => setTimeout(() => { el.value = kept; }, 100));
+            }
+            return true;
+            """)
+        for f in fields.prefix(3) {
+            let filled = await web.fill(f, res.answers[f.spec.id] ?? "")
+            XCTAssertTrue(filled, f.spec.label)
+        }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let typed = try await web.js("return ['m', 'd', 'y'].map(i => document.getElementById(i).value).join('/')") as? String
+        XCTAssertEqual(typed, String(format: "%02d/%02d/%d", c.month!, c.day!, c.year!))
+    }
+
+    /// bunq's application is a popup that Escape closes: reading and choosing in its lists must leave it open (its
+    /// boxes were all gone by the time they were filled).
+    func testListsInAPopupThatEscapeCloses() async throws {
+        try await web.loadTestHTML("""
+            <div id="dlg" role="dialog" aria-modal="true"><h2>Nice to meet you!</h2><p>Tell us who you are.</p>
+              <label for="v">Which visa situation fits you best?</label>
+              <div><input id="v" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="vl" value="">
+                <ul id="vl" role="listbox" style="display:none"><li role="option">I need sponsorship</li><li role="option">I don't need sponsorship</li></ul></div>
+              <label for="n">What is your full name?</label><input id="n">
+            </div>
+            <script>
+              const box = document.getElementById('v'), list = document.getElementById('vl');
+              const show = on => { list.style.display = on ? 'block' : 'none'; box.setAttribute('aria-expanded', String(on)); };
+              box.addEventListener('mousedown', e => { e.stopPropagation(); show(true); });
+              box.addEventListener('focus', () => show(true));
+              list.addEventListener('mousedown', e => e.stopPropagation());
+              list.querySelectorAll('li').forEach(li => li.addEventListener('click', () => { box.value = li.innerText; show(false); }));
+              document.addEventListener('mousedown', () => show(false));
+              document.addEventListener('keydown', e => { if (e.key === 'Escape') document.getElementById('dlg').remove(); });
+            </script>
+            """, base: URL(string: "https://careers.bunq.com/o/1")!)
+        let fields = await web.extractFields()
+        let open = try await web.js("return !!document.getElementById('dlg')") as? Bool
+        XCTAssertEqual(open, true, "reading the list's choices left the popup open")
+        let list = try XCTUnwrap(fields.first { $0.kind == .combobox || $0.spec.label.hasPrefix("Which visa") })
+        XCTAssertEqual(list.spec.options, ["I need sponsorship", "I don't need sponsorship"])
+        let filled = await web.fill(list, "I don't need sponsorship")
+        XCTAssertTrue(filled)
+        let name = try XCTUnwrap(fields.first { $0.spec.label.hasPrefix("What is your full name") })
+        let typed = await web.fill(name, "Jane Doe")
+        XCTAssertTrue(typed)
+        let still = try await web.js("return !!document.getElementById('dlg')") as? Bool
+        XCTAssertEqual(still, true)
+    }
+
+    /// Toyota's Phenom lists draw their choice from the page's own state: right after a change the old choice shows,
+    /// then the new one. The choice took.
+    func testAListThatShowsItsChoiceAMomentLater() async throws {
+        try await web.loadTestHTML("""
+            <form><label for="d">Device Type*</label>
+              <select id="d" required><option value="">Please select</option><option value="Mobile">Mobile</option></select></form>
+            <script>
+              let state = '';
+              const d = document.getElementById('d');
+              d.addEventListener('change', () => { const v = d.value; d.value = state; setTimeout(() => { state = v; d.value = v; }, 100); });
+            </script>
+            """, base: URL(string: "https://careers.toyota.com/us/en/apply")!)
+        let found = await web.extractFields(readOptions: false)
+        let field = try XCTUnwrap(found.first)
+        let ok = await web.fill(field, "Mobile")
+        XCTAssertTrue(ok)
+        let value = try await web.js("return document.getElementById('d').value") as? String
+        XCTAssertEqual(value, "Mobile")
+    }
+
+    /// Rippling's list stays open after its choices are read (Escape and its own box leave it open) and, open, hides
+    /// its question: a press beside it closes it, so the person is asked "please pick the opposite of Yes", not "".
+    func testAListThatOnlyClosesWhenThePageIsPressed() async throws {
+        try await web.loadTestHTML("""
+            <form onsubmit="return false"><h1>Application: Developer</h1>
+              <div><div><div><p>To be considered, please pick the opposite of Yes.</p></div></div>
+                <div data-testid="field"><div id="slot"><div data-testid="q2"><div><div class="select-controller"><div>
+                  <div id="q2" role="combobox" aria-haspopup="listbox" aria-expanded="false" aria-label="Select" aria-required="true" tabindex="0"><p>Select</p></div>
+                </div></div></div></div></div></div>
+            </form>
+            <script>
+              const box = document.getElementById('q2');
+              box.addEventListener('mousedown', e => {
+                e.stopPropagation();
+                if (document.getElementById('pop')) return;
+                document.getElementById('slot').insertAdjacentHTML('beforeend', '<div id="pop" role="dialog" aria-label="Select"><ul role="listbox" aria-label="Select"><li role="option">Yes</li><li role="option">No</li></ul></div>');
+                document.getElementById('pop').addEventListener('mousedown', e => e.stopPropagation());
+                box.setAttribute('aria-expanded', 'true');
+              });
+              document.addEventListener('mousedown', () => { const p = document.getElementById('pop'); if (p) p.remove(); box.setAttribute('aria-expanded', 'false'); });
+            </script>
+            """, base: URL(string: "https://ats.rippling.com/acme/jobs/1/apply")!)
+        let fields = await web.extractFields()
+        XCTAssertEqual(fields.map(\.spec.options), [["Yes", "No"]])
+        let open = try await web.js("return document.getElementById('q2').getAttribute('aria-expanded')") as? String
+        XCTAssertEqual(open, "false")
+        let again = await web.extractFields(readOptions: false)
+        XCTAssertEqual(again.map(\.spec.label), ["To be considered, please pick the opposite of Yes."])
     }
 }
 

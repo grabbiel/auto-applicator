@@ -51,11 +51,22 @@ public struct CloudConfig: Codable, Sendable, Equatable {
 
     /// `cloud.json` in the data folder (if someone put one there), else the copy inside the app.
     public static func load(paths: AppPaths, bundle: Bundle = .main) -> CloudConfig? {
-        let candidates = [paths.home.appendingPathComponent("cloud.json"), bundle.url(forResource: "CloudConfig", withExtension: "json")]
-        for case let url? in candidates {
-            if let data = try? Data(contentsOf: url), let config = try? JSONDecoder().decode(CloudConfig.self, from: data) { return config }
+        let read = { (url: URL?) -> CloudConfig? in
+            url.flatMap { try? Data(contentsOf: $0) }.flatMap { try? JSONDecoder().decode(CloudConfig.self, from: $0) }
         }
-        return nil
+        return merged(read(paths.home.appendingPathComponent("cloud.json")),
+                      builtIn: read(bundle.url(forResource: "CloudConfig", withExtension: "json")))
+    }
+
+    /// The data folder's file wins, but what it leaves out (a file written before the cloud AI existed has no
+    /// `helperFunction`) comes from the app's own copy when both describe the same sign-in.
+    static func merged(_ local: CloudConfig?, builtIn: CloudConfig?) -> CloudConfig? {
+        guard var config = local else { return builtIn }
+        guard let builtIn, builtIn.region == config.region, builtIn.userPoolId == config.userPoolId else { return config }
+        if (config.helperFunction ?? "").isEmpty { config.helperFunction = builtIn.helperFunction }
+        if (config.helperModel ?? "").isEmpty { config.helperModel = builtIn.helperModel }
+        if config.signInProviders == nil { config.signInProviders = builtIn.signInProviders }
+        return config
     }
 
     var issuer: String { "cognito-idp.\(region).amazonaws.com/\(userPoolId)" }

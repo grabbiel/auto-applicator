@@ -97,9 +97,15 @@ public protocol MailSession: AnyObject, Sendable {
     /// UIDs of messages received on or after the day of `date`, newest first.
     func uids(since date: Date) async throws -> [Int]
     func fetch(uid: Int) async throws -> Data?
+    /// When the messages reached the mailbox, read without downloading them (empty when unknown).
+    func arrivals(uids: [Int]) async throws -> [Int: Date]
     func markSeen(uid: Int) async throws
     func unseenCount() async throws -> Int
     func close()
+}
+
+public extension MailSession {
+    func arrivals(uids: [Int]) async throws -> [Int: Date] { [:] }
 }
 
 extension IMAPClient: MailSession {
@@ -173,15 +179,23 @@ public final class EmailVerifier: @unchecked Sendable {
             spam?.close()
         }
         var examined = Set<String>()
+        var downloaded = 0
+        var fromSite: [String] = []  // the site's emails that held no code or link
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline, !Task.isCancelled {
             for (name, box) in [("inbox", Optional(session)), ("spam", spam)] {
                 guard let box else { continue }
                 do {
                     try await box.refresh()
-                    for uid in try await box.uids(since: since) where !examined.contains("\(name)/\(uid)") {
+                    let fresh = try await box.uids(since: since).filter { !examined.contains("\(name)/\($0)") }
+                    // The search goes back a day: what arrived before the site was asked isn't downloaded (a busy
+                    // inbox's hundreds of messages took longer than the whole wait, so the new one was never read).
+                    let arrived = (try? await box.arrivals(uids: fresh)) ?? [:]
+                    for uid in fresh {
                         examined.insert("\(name)/\(uid)")
+                        if let d = arrived[uid], d < since.addingTimeInterval(-120) { continue }
                         guard let raw = try await box.fetch(uid: uid) else { continue }
+                        downloaded += 1
                         let parsed = MIME.parse(raw)
                         if let d = parsed.date, d < since.addingTimeInterval(-120) { continue }
                         guard VerificationExtractor.matchesHint(parsed, senderHint) else { continue }
@@ -191,6 +205,7 @@ public final class EmailVerifier: @unchecked Sendable {
                             Log.info("Verification email found\(name == "spam" ? " in spam" : ""): \"\(parsed.subject)\" from \(parsed.sender)")
                             return result
                         }
+                        fromSite.append("\"\(parsed.subject.prefix(80))\" (\(parsed.links.count) link(s))")
                     }
                 } catch where name == "spam" {
                     spam = nil  // keep watching the inbox
@@ -201,6 +216,8 @@ public final class EmailVerifier: @unchecked Sendable {
             }
             try? await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
         }
+        Log.info("No \(kind) email matching “\(senderHint)” within \(Int(timeout)) s: read \(downloaded) new message(s)"
+                 + (fromSite.isEmpty ? "" : "; from the site but without what was wanted: " + fromSite.prefix(3).joined(separator: ", ")))
         return nil
     }
 

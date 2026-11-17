@@ -4,22 +4,22 @@ import XCTest
 /// The cloud AI: asked only about what the on-device AI couldn't answer, under the same rules, and what it answers
 /// reaches the on-device AI.
 final class CloudAITests: XCTestCase {
-    let hybrid = field("Are you comfortable working a hybrid schedule from our office?", .radio, ["Yes", "No"], id: "f_hybrid")
+    let pairing = field("Are you comfortable pair programming for most of the day?", .radio, ["Yes", "No"], id: "f_pair")
 
     func testAnswersWhatTheOnDeviceAICouldntAndTeachesIt() async throws {
         let home = try TestHome()
-        let local = FakeModel(["hybrid": ("Yes", .low), "favorite color": ("Blue", .medium)])
-        let cloud = FakeModel(["hybrid": ("Yes", .high)])
+        let local = FakeModel(["pair program": ("Yes", .low), "favorite color": ("Blue", .medium)])
+        let cloud = FakeModel(["pair program": ("Yes", .high)])
         let answerer = Answerer(profile: Fixture.profile, db: home.db, ai: AIService(model: local), helper: AIService(model: cloud))
         let rust = field("Years of experience with Rust", .number, id: "f_rust")
         let color = field("Favorite color", .select, ["Red", "Blue"], id: "f_color")
 
-        let res = await answerer.resolve([hybrid, rust, color], job: Fixture.job)
-        XCTAssertEqual(res.answers, ["f_hybrid": "Yes", "f_color": "Blue"])
-        XCTAssertEqual(res.sources, ["f_hybrid": "cloud:high", "f_color": "llm:medium"])
+        let res = await answerer.resolve([pairing, rust, color], job: Fixture.job)
+        XCTAssertEqual(res.answers, ["f_pair": "Yes", "f_color": "Blue"])
+        XCTAssertEqual(res.sources, ["f_pair": "cloud:high", "f_color": "llm:medium"])
         XCTAssertEqual(res.unresolved.map(\.id), ["f_rust"], "a question never guessed isn't sent to the cloud either")
-        XCTAssertEqual(cloud.calls, [[hybrid.label]], "only what the on-device AI missed")
-        XCTAssertEqual(home.db.cacheSource(Answerer.hash(hybrid)), "cloud:high")
+        XCTAssertEqual(cloud.calls, [[pairing.label]], "only what the on-device AI missed")
+        XCTAssertEqual(home.db.cacheSource(Answerer.hash(pairing)), "cloud:high")
         let email = Fixture.profile.personal.email, phone = Fixture.profile.personal.phone
         XCTAssertTrue(local.prompts[0].contains(email))
         XCTAssertFalse(cloud.prompts[0].contains(email), "the cloud gets no email address")
@@ -27,27 +27,42 @@ final class CloudAITests: XCTestCase {
         XCTAssertTrue(cloud.prompts[0].contains("work_authorization:"), "but the rest of the profile")
 
         // The same question on the next form: from the cache, with no AI at all.
-        let again = await answerer.resolve([hybrid], job: Fixture.job)
-        XCTAssertEqual(again.sources, ["f_hybrid": "cache"])
+        let again = await answerer.resolve([pairing], job: Fixture.job)
+        XCTAssertEqual(again.sources, ["f_pair": "cache"])
 
         // A related question: the on-device AI is shown the cloud's answer and may cite it.
-        let related = field("Can you work a hybrid schedule, 3 days a week in the office?", .radio, ["Yes", "No"], id: "f_related")
-        local.table["hybrid"] = ("Yes", .high)
-        local.evidence = "comfortable working a hybrid schedule from our office? A: Yes"
+        let related = field("Can you pair program with a teammate most days?", .radio, ["Yes", "No"], id: "f_related")
+        local.table["pair program"] = ("Yes", .high)
+        local.evidence = "comfortable pair programming for most of the day? A: Yes"
         let taught = await answerer.resolve([related], job: Fixture.job)
-        XCTAssertTrue(local.prompts.last!.contains("Q: \(hybrid.label) A: Yes"), local.prompts.last!)
+        XCTAssertTrue(local.prompts.last!.contains("Q: \(pairing.label) A: Yes"), local.prompts.last!)
         XCTAssertEqual(taught.sources, ["f_related": "llm:high"])
         XCTAssertEqual(cloud.calls.count, 1, "the cloud AI wasn't needed again")
     }
 
     func testTheCloudAIFollowsTheSameRules() async throws {
         let home = try TestHome()
-        let cloud = FakeModel(["hybrid": ("Yes", .high), "travel": ("Yes", .medium)])
+        let cloud = FakeModel(["pair program": ("Yes", .high), "travel": ("Yes", .medium)])
         cloud.evidence = "Enjoys working from a beach in Bali"  // in neither the profile nor the job
         let answerer = Answerer(profile: Fixture.profile, db: home.db, ai: AIService(model: FakeModel()), helper: AIService(model: cloud))
-        let res = await answerer.resolve([hybrid], job: Fixture.job)
-        XCTAssertEqual(res.unresolved.map(\.id), ["f_hybrid"], "an answer that cites nothing real is the person's to give")
-        XCTAssertNil(home.db.cacheSource(Answerer.hash(hybrid)))
+        let res = await answerer.resolve([pairing], job: Fixture.job)
+        XCTAssertEqual(res.unresolved.map(\.id), ["f_pair"], "an answer that cites nothing real is the person's to give")
+        XCTAssertNil(home.db.cacheSource(Answerer.hash(pairing)))
+    }
+
+    func testAListTooLongForTheOnDeviceAIGoesToTheCloudAI() async throws {
+        let home = try TestHome()
+        let local = FakeModel(default: ("Yes", .high))
+        local.compact = true
+        let cloud = FakeModel(["product area": ("Backend Services", .high)])
+        let answerer = Answerer(profile: Fixture.profile, db: home.db, ai: AIService(model: local), helper: AIService(model: cloud))
+        // Like Fiserv's "Field of study": hundreds of options, more than the on-device AI's window holds.
+        let options = (1...400).map { "Product area number \($0)" } + ["Backend Services"]
+        let area = field("Which product area interests you most?", .select, options, id: "f_area")
+        let res = await answerer.resolve([area], job: Fixture.job)
+        XCTAssertEqual(res.answers["f_area"], "Backend Services")
+        XCTAssertTrue(local.calls.isEmpty, "the on-device AI isn't shown a list it can't hold")
+        XCTAssertEqual(cloud.calls, [[area.label]])
     }
 
     func testWorksWithoutTheOnDeviceAIUpToItsLimit() async throws {
@@ -55,10 +70,10 @@ final class CloudAITests: XCTestCase {
         let cloud = FakeModel(default: ("Yes", .high))
         let answerer = Answerer(profile: Fixture.profile, db: home.db, ai: nil, helper: AIService(model: cloud), helperBudget: 1)
         let travel = field("Are you open to occasional travel to client offices?", .radio, ["Yes", "No"], id: "f_travel")
-        let res = await answerer.resolve([hybrid, travel], job: Fixture.job)
-        XCTAssertEqual(res.answers, ["f_hybrid": "Yes"])
+        let res = await answerer.resolve([pairing, travel], job: Fixture.job)
+        XCTAssertEqual(res.answers, ["f_pair": "Yes"])
         XCTAssertEqual(res.unresolved.map(\.id), ["f_travel"], "past the run's limit, the person answers")
-        XCTAssertEqual(cloud.calls, [[hybrid.label]])
+        XCTAssertEqual(cloud.calls, [[pairing.label]])
     }
 
     func testStopsAskingWhenTheCloudAIIsUnavailable() async throws {
@@ -66,8 +81,8 @@ final class CloudAITests: XCTestCase {
         let cloud = FakeModel(default: ("Yes", .high))
         cloud.failure = AIError.unavailable("The model isn't enabled.")
         let answerer = Answerer(profile: Fixture.profile, db: home.db, ai: AIService(model: FakeModel()), helper: AIService(model: cloud))
-        let first = await answerer.resolve([hybrid], job: Fixture.job)
-        XCTAssertEqual(first.unresolved.map(\.id), ["f_hybrid"])
+        let first = await answerer.resolve([pairing], job: Fixture.job)
+        XCTAssertEqual(first.unresolved.map(\.id), ["f_pair"])
         let travel = field("Are you open to occasional travel to client offices?", .radio, ["Yes", "No"], id: "f_travel")
         let second = await answerer.resolve([travel], job: Fixture.job)
         XCTAssertEqual(second.unresolved.map(\.id), ["f_travel"])
@@ -126,6 +141,35 @@ final class CloudAITests: XCTestCase {
         let old = try? JSONDecoder().decode(CloudConfig.self, from: Data(#"{"region":"us-east-1","userPoolId":"p","clientId":"c","signInHost":"h","identityPoolId":"i","browserId":"b","browserProfileId":"f"}"#.utf8))
         XCTAssertNotNil(old, "a file written before the cloud AI still loads")
         XCTAssertNil(old?.helperFunction)
+    }
+
+    /// A `cloud.json` left in the data folder from before the cloud AI existed (the real app ran a whole day without
+    /// it): what the file leaves out comes from the app's own copy, but never from another deployment's.
+    func testAnOldCloudFileStillGetsTheCloudAI() throws {
+        var old = Self.config
+        old.helperFunction = nil
+        old.helperModel = nil
+        let merged = try XCTUnwrap(CloudConfig.merged(old, builtIn: Self.config))
+        XCTAssertEqual(merged.helperFunction, "auto-applicator-form-helper")
+        XCTAssertEqual(merged.helperName, "Amazon Nova 2 Lite")
+        XCTAssertEqual(merged.browserId, "b")
+
+        var mine = old
+        mine.helperFunction = "my-own-helper"
+        XCTAssertEqual(CloudConfig.merged(mine, builtIn: Self.config)?.helperFunction, "my-own-helper", "the data folder's file wins")
+
+        var elsewhere = Self.config
+        elsewhere.userPoolId = "another-pool"
+        XCTAssertNil(CloudConfig.merged(old, builtIn: elsewhere)?.helperFunction, "another sign-in's function can't be called")
+        XCTAssertEqual(CloudConfig.merged(nil, builtIn: Self.config), Self.config)
+
+        let home = try TestHome()
+        try JSONEncoder().encode(old).write(to: home.paths.home.appendingPathComponent("cloud.json"))
+        let bundleDir = home.paths.home.appendingPathComponent("bundle", isDirectory: true)
+        try FileManager.default.createDirectory(at: bundleDir, withIntermediateDirectories: true)
+        try JSONEncoder().encode(Self.config).write(to: bundleDir.appendingPathComponent("CloudConfig.json"))
+        let bundle = try XCTUnwrap(Bundle(url: bundleDir))
+        XCTAssertEqual(CloudConfig.load(paths: home.paths, bundle: bundle)?.helperFunction, "auto-applicator-form-helper")
     }
 
     /// Opt-in: the deployed function, with made-up details (AA_CLOUD_TEST=1 and AWS credentials allowed to invoke it).

@@ -350,7 +350,7 @@ Resources:
       Architectures: [arm64]
       Handler: index.handler
       MemorySize: 256
-      Timeout: 90
+      Timeout: 120
       ReservedConcurrentExecutions: 2     # one run asks one question at a time; this also caps the spend
       Role: !GetAtt FormHelperRole.Arn
       Environment:
@@ -367,7 +367,7 @@ Resources:
 
           MODEL = os.environ["MODEL"]
           NOVA2 = ".amazon.nova-2" in MODEL  # thinks before answering; Claude can't while it must answer with the tool
-          bedrock = boto3.client("bedrock-runtime", config=Config(read_timeout=80, retries={"max_attempts": 4, "mode": "adaptive"}))
+          bedrock = boto3.client("bedrock-runtime", config=Config(read_timeout=110, retries={"max_attempts": 4, "mode": "adaptive"}))
 
 
           def handler(event, context):
@@ -380,13 +380,14 @@ Resources:
                   modelId=MODEL,
                   system=[{"text": system}],
                   messages=[{"role": "user", "content": [{"text": prompt}]}],
-                  inferenceConfig={"maxTokens": 4000} if NOVA2 else {"maxTokens": 3000, "temperature": 0},
+                  # Nova 2's thinking counts toward its limit: 4000 cut off four answers in ten.
+                  inferenceConfig={"maxTokens": 10000} if NOVA2 else {"maxTokens": 3000, "temperature": 0},
                   toolConfig={"tools": [{"toolSpec": {"name": "answer", "description": "Records the answer to every field.",
                                                       "inputSchema": {"json": schema}}}],
                               "toolChoice": {"tool": {"name": "answer"}}},
               )
               if NOVA2:
-                  request["additionalModelRequestFields"] = {"reasoningConfig": {"type": "enabled", "maxReasoningEffort": "medium"}}
+                  request["additionalModelRequestFields"] = {"reasoningConfig": {"type": "enabled", "maxReasoningEffort": "low"}}
               try:
                   try:
                       r = bedrock.converse(**request)

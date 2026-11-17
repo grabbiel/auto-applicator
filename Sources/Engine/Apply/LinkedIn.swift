@@ -232,6 +232,14 @@ extension WebAgent {
             while waited < 8, !left() { try await sleep(0.25); waited += 0.25 }
             break
         }
+        // Pressed, and LinkedIn says so ("Job moved to In progress under Clicked apply"), but no company page came
+        // (Evident's, about once a run): once more.
+        if !left(), await exists(#"[data-auto-apply="1"]"#) {
+            Log.info("LinkedIn's Apply opened nothing; pressing it once more")
+            await click(#"[data-auto-apply="1"]"#)
+            waited = 0
+            while waited < 10, !left() { try await sleep(0.25); waited += 0.25 }
+        }
         guard left() else { throw BrowserError("The Apply button didn't open the company's site.") }
         try await waitForRedirects(timeout: timeout)
     }

@@ -27,20 +27,31 @@ public struct CloudModel: LanguageModel {
     var invokeURL: URL { URL(string: "https://lambda.\(region).amazonaws.com/2015-03-31/functions/\(function)/invocations")! }
 
     public func generate(instructions: String, prompt: String, schema: AISchema) async throws -> [String: Any] {
-        var request = URLRequest(url: invokeURL, timeoutInterval: 100)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: ["system": instructions, "prompt": prompt, "schema": schema.jsonSchema()])
-        let creds: AWSCredentials
-        do {
-            creds = try await credentials()
-        } catch {
-            throw AIError.unavailable("The cloud AI needs the cloud browser sign-in. \(error.localizedDescription)")
+        let body = try JSONSerialization.data(withJSONObject: ["system": instructions, "prompt": prompt, "schema": schema.jsonSchema()])
+        // It takes a few questions at a time; when it's busy, it's asked again a moment later.
+        for attempt in 0..<3 {
+            var request = URLRequest(url: invokeURL, timeoutInterval: 130)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = body
+            let creds: AWSCredentials
+            do {
+                creds = try await credentials()
+            } catch {
+                throw AIError.unavailable("The cloud AI needs the cloud browser sign-in. \(error.localizedDescription)")
+            }
+            SigV4(credentials: creds, region: region, service: "lambda").sign(&request)
+            let (data, response) = try await session.data(for: request)
+            do {
+                return try Self.read(data, response as? HTTPURLResponse)
+            } catch AIError.server(let why) where why == Self.busy && attempt < 2 {
+                try await Task.sleep(nanoseconds: UInt64(2 + attempt * 4) * 1_000_000_000)
+            }
         }
-        SigV4(credentials: creds, region: region, service: "lambda").sign(&request)
-        let (data, response) = try await session.data(for: request)
-        return try Self.read(data, response as? HTTPURLResponse)
+        throw AIError.server(Self.busy)
     }
+
+    static let busy = "The cloud AI is busy."
 
     public func generateText(instructions: String, prompt: String) async throws -> String {
         throw AIError.unavailable("The cloud AI only answers form questions.")
@@ -59,7 +70,7 @@ public struct CloudModel: LanguageModel {
             case 404:
                 throw AIError.unavailable("The cloud AI isn't set up in your AWS account. Run scripts/deploy_cloud.sh, then rebuild the app.")
             case 429:
-                throw AIError.server("The cloud AI is busy.")
+                throw AIError.server(Self.busy)
             default:
                 throw AIError.server("The cloud AI failed (HTTP \(status)). \(message)")
             }
@@ -70,7 +81,7 @@ public struct CloudModel: LanguageModel {
         if let error = json?["error"] as? String {
             switch error {
             case "too long": throw AIError.contextTooLong
-            case "busy": throw AIError.server("The cloud AI is busy.")
+            case "busy": throw AIError.server(Self.busy)
             case "AccessDeniedException", "ResourceNotFoundException":
                 // The model isn't enabled in the account (or needs a one-time form in the Bedrock console).
                 throw AIError.unavailable("The cloud AI's model isn't available in your AWS account (\(error)). Check it in the Bedrock console, or deploy another one with AA_HELPER_MODEL.")

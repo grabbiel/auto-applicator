@@ -124,6 +124,19 @@ extension WebAgent {
         return []
     }
 
+    /// A list's row that adds what was typed as a new choice: "Add Acme Corp…", "Create “Acme Corp”", "Use: Acme Corp".
+    nonisolated static func addsTyped(_ row: String, _ typed: String) -> Bool {
+        let want = typed.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let marks = CharacterSet(charactersIn: "\"“”'‘’:…+ ").union(.whitespacesAndNewlines)
+        var text = row.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasSuffix("...") { text = String(text.dropLast(3)) }
+        text = text.trimmingCharacters(in: marks)
+        guard !want.isEmpty else { return false }
+        return ["add new ", "create new ", "add ", "create ", "use ", "enter "].contains { lead in
+            text.hasPrefix(lead) && String(text.dropFirst(lead.count)).trimmingCharacters(in: marks) == want
+        }
+    }
+
     /// A list's message rather than a choice: "No results found", "Please enter 1 or more characters".
     static let listMessage = Regex(#"^(no (results|matches|options)( found)?|please enter \d+ or more characters?|searching|loading)\b"#)
 
@@ -133,6 +146,20 @@ extension WebAgent {
 
     /// A label that took in the field's error message ("Are you currently a student? This field is required"), which
     /// would make it another question for the answers saved before.
+    /// "03/15/2022" → "2022-03-15" (day first when the box says DD/MM); "03/2022" → "2022-03-01". Nil for anything else.
+    nonisolated static func isoDate(_ value: String, dayFirst: Bool) -> String? {
+        let v = value.trimmed
+        if let g = Regex(#"^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})$"#).firstGroups(v), let a = Int(g[1] ?? ""), let b = Int(g[2] ?? ""), let y = Int(g[3] ?? "") {
+            let (month, day) = dayFirst ? (b, a) : (a, b)
+            guard (1...12).contains(month), (1...31).contains(day) else { return nil }
+            return String(format: "%04d-%02d-%02d", y, month, day)
+        }
+        if let g = Regex(#"^(\d{1,2})[/.-](\d{4})$"#).firstGroups(v), let m = Int(g[1] ?? ""), let y = Int(g[2] ?? ""), (1...12).contains(m) {
+            return String(format: "%04d-%02d-01", y, m)
+        }
+        return nil
+    }
+
     nonisolated static func withoutErrorNote(_ label: String, error: String) -> String {
         var l = label.trimmingCharacters(in: .whitespacesAndNewlines)
         let e = error.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -149,7 +176,22 @@ extension WebAgent {
         if await click(f.selector) {
             try? await sleep(0.5)
             options = await visibleOptions(f)
-            await press(.escape, selector: f.selector)
+            await closeList(f.selector)
+            // A list that Escape doesn't close (bunq's) closes when its box is pressed again; left open, the next box's
+            // choices would be read from it. Asked after a moment: Workday's says it's open for a while after Escape
+            // closed it, and pressing its box then opens it again.
+            try? await sleep(0.3)
+            let open = #"const e = document.querySelector(sel); return !!e && e.getAttribute('aria-expanded') === 'true';"#
+            if await bool(open, ["sel": f.selector]) {
+                await click(f.selector)
+                try? await sleep(0.3)
+            }
+            // One that neither closes (Rippling's last list, whose open list hid its question "please pick the opposite
+            // of Yes"): a press on the page beside it, as a person closes it.
+            if await bool(open, ["sel": f.selector]) {
+                await pressBeside(f.selector)
+                try? await sleep(0.3)
+            }
         }
         options = options.filter { !$0.isEmpty && !isPlaceholderOption($0) && !["no options", "loading..."].contains($0.lowercased()) }
         if (1...80).contains(options.count) {
@@ -160,20 +202,111 @@ extension WebAgent {
         }
     }
 
+    /// Closes a box's open list. Escape would close a popup the form sits in as well (bunq's "Nice to meet you!" form,
+    /// whose boxes were all gone by the time they were filled): there, a press beside the box inside the popup.
+    func closeList(_ selector: String) async {
+        let inPopup = await bool("const e = document.querySelector(sel); return !!e && !!e.closest('[role=dialog], [role=alertdialog], dialog, [aria-modal=true]');",
+                                 ["sel": selector])
+        if inPopup { await pressBeside(selector) } else { await press(.escape, selector: selector) }
+    }
+
+    /// A press where a person clicks to close a list: on the page beside it, or on the words of the popup the box is in
+    /// (never the popup's backdrop, which would close it).
+    func pressBeside(_ selector: String) async {
+        await bool(Scripts.prelude + #"""
+            const e = document.querySelector(sel);
+            const d = e && e.closest('[role=dialog], [role=alertdialog], dialog, [aria-modal=true]');
+            const t = !d ? document.body : [...d.querySelectorAll('h1, h2, h3, h4, p')]
+              .find(x => shown(x) && !x.querySelector('input, select, textarea, button, a') && !x.closest('[role=listbox], [role=option], label, button, a, [role=combobox]'));
+            if (!t) return false;
+            const r = t.getBoundingClientRect();
+            const at = d ? {clientX: r.left + 2, clientY: r.top + Math.min(r.height / 2, 8)} : {clientX: 1, clientY: 1};
+            for (const k of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'])
+              t.dispatchEvent(new (k.startsWith('pointer') ? PointerEvent : MouseEvent)(k, Object.assign({bubbles: true, cancelable: true, view: window}, at)));
+            return true;
+            """#, ["sel": selector])
+    }
+
+    /// A box that suggests things as they're typed and keeps only one picked from them (Lever's "Current location",
+    /// emptied unless "Austin, TX, USA" is picked from under it): the answer typed (then only its first part, "Austin"),
+    /// and the suggestion that holds it picked. A US state counts written either way ("TX", "Texas").
+    func pickTypedSuggestion(_ f: FormField, _ value: String) async -> Bool {
+        let pieces = value.components(separatedBy: ",").map(\.trimmed).filter { !$0.isEmpty }
+        guard let first = pieces.first, first.count >= 2, value.count <= 120 else { return false }
+        let key = { (s: String) in s.lowercased().replacingOccurrences(of: #"[^\p{L}\p{N}]+"#, with: " ", options: .regularExpression).trimmed }
+        let parts: [[String]] = pieces.map { p in
+            var ways = [key(p)]
+            if p.count == 2, let name = LinkedIn.usStates[p.uppercased()] { ways.append(key(name)) }
+            if let code = LinkedIn.usStates.first(where: { key($0.value) == key(p) })?.key { ways.append(code.lowercased()) }
+            if ["united states", "united states of america", "usa", "us"].contains(key(p)) { ways += ["united states", "usa", "us"] }
+            return ways
+        }
+        _ = await bool(Scripts.markShownBelow, ["sel": f.selector])
+        for query in first == value ? [value] : [value, first] {
+            await click(f.selector)
+            _ = await bool("const e = document.querySelector(sel); if (e && e.select) e.select(); return true;", ["sel": f.selector])
+            guard await typeKeys(query) else { return false }
+            for _ in 0..<6 {
+                try? await sleep(0.5)
+                let hit = await string(Scripts.tagTypedSuggestion, ["sel": f.selector, "parts": parts])
+                guard !hit.isEmpty else { continue }
+                await click(#"[data-aa-sugg="1"]"#)
+                try? await sleep(0.6)
+                let now = await string("const e = document.querySelector(sel); return e ? (e.value || '') : '';", ["sel": f.selector])
+                if !now.trimmed.isEmpty {
+                    Log.info("Picked “\(hit.prefix(60))” from what “\(f.spec.plainLabel.prefix(40))” suggested")
+                    return true
+                }
+                break
+            }
+        }
+        return false
+    }
+
     /// Writes an answer into a control. Returns false if the control didn't take it.
     public func fill(_ f: FormField, _ answer: String) async -> Bool {
         switch f.kind {
         case .text:
             var value = answer
             if let max = f.spec.maxLength, max > 0, value.count > max { value = String(value.prefix(max)) }
-            if await fill(f.selector, value) { return true }
+            let iso = Self.isoDate(value, dayFirst: f.spec.placeholder.lowercased().hasPrefix("dd"))
+            // A part of a date that counts up and down (Rippling's MM / DD / YYYY, role=spinbutton) keeps only what's
+            // typed on the keyboard: a value set any other way is gone when the form draws itself again.
+            if await bool("const e = document.querySelector(sel); return !!e && e.getAttribute('role') === 'spinbutton' && e.tagName === 'INPUT';", ["sel": f.selector]) {
+                await click(f.selector)
+                _ = await bool("const e = document.querySelector(sel); if (e && e.select) e.select(); return true;", ["sel": f.selector])
+                if await typeKeys(value) {
+                    try? await sleep(0.3)
+                    let now = await string("const e = document.querySelector(sel); return e ? (e.value || '') : '';", ["sel": f.selector])
+                    if now == value || (Int(now) != nil && Int(now) == Int(value)) { return true }
+                }
+            }
+            if await fill(f.selector, value) {
+                // A date picker that keeps its dates as 2022-03-01 (SmartRecruiters' "Pick a date") reads "03/01/2022"
+                // as January 2022: the date again, written its way.
+                if let iso, iso != value {
+                    let now = await string("const e = document.querySelector(sel); return e ? (e.value || '') : '';", ["sel": f.selector])
+                    if Regex(#"^\d{4}-\d{2}-\d{2}$"#).fullMatch(now), now != iso { return await fill(f.selector, iso) }
+                }
+                return true
+            }
             // A box that becomes the browser's own date picker once it has the focus (Paylocity's "Available to
             // Start", shown as MM/DD/YYYY) takes a date only as 2026-12-15.
-            if let g = Regex(#"^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})$"#).firstGroups(value.trimmed), let m = g[1], let d = g[2], let y = g[3],
-               let mi = Int(m), let di = Int(d) {
-                let (month, day) = f.spec.placeholder.lowercased().hasPrefix("dd") ? (di, mi) : (mi, di)
-                return await fill(f.selector, String(format: "%@-%02d-%02d", y, month, day))
+            if let iso, await fill(f.selector, iso) { return true }
+            // A date picker that keeps only what's typed (Workable's react-datepicker empties a date set any other
+            // way): the date typed, then Tab to close its calendar.
+            if iso != nil, await bool("const e = document.querySelector(sel); return !!e && !e.readOnly && e.type !== 'date';", ["sel": f.selector]) {
+                await click(f.selector)
+                _ = await bool("const e = document.querySelector(sel); if (e && e.select) e.select(); return true;", ["sel": f.selector])
+                if await typeKeys(value) {
+                    try? await sleep(0.3)
+                    await press(.tab)
+                    try? await sleep(0.3)
+                    let now = await string("const e = document.querySelector(sel); return e ? (e.value || '') : '';", ["sel": f.selector])
+                    return now == value || (iso != nil && now == iso)
+                }
             }
+            if iso == nil { return await pickTypedSuggestion(f, value) }
             return false
         case .select:
             if await selectOption(f.selector, label: answer) { return true }
@@ -215,11 +348,20 @@ extension WebAgent {
             for part in parts where chosen < f.spec.maxChoices {
                 if await chooseOne(f, part, multi: true) { chosen += 1 }
             }
-            if chosen == 0 { await press(.escape) }
+            if chosen == 0 { await closeList(f.selector) }
             return chosen > 0
         }
-        return await chooseOne(f, answer, multi: false)
+        if await chooseOne(f, answer, multi: false) { return true }
+        // A list that says what to choose when the answer isn't in it (Dropbox's "School name (type to find; select
+        // “Other” if not listed)"): that.
+        if norm(answer) != "other", Self.otherIfNotListed.matches(f.spec.label) {
+            Log.info("“\(answer.prefix(40))” isn't in “\(f.spec.label.prefix(40))”; choosing “Other” as it says")
+            return await chooseOne(f, "Other", multi: false)
+        }
+        return false
     }
+
+    static let otherIfNotListed = Regex(#"\b(select|choose|pick|use)\s+["“'‘]?other["”'’]?\s+if\b.{0,30}\bnot\s+(listed|found|(shown|there|available|in the list))"#)
 
     private func chooseOne(_ f: FormField, _ answer: String, multi: Bool) async -> Bool {
         await click(f.selector)
@@ -229,17 +371,26 @@ extension WebAgent {
         var listOf = f.selector
         if !f.isInput {
             try? await sleep(0.3)
-            if await bool(Scripts.popupSearch, ["sel": f.selector]) {
+            // (The box inside the list, Zoho's, types; the list still says where its choices are.)
+            let search = await string(Scripts.popupSearch, ["sel": f.selector])
+            if !search.isEmpty {
                 typeIn = #"[data-auto-search="1"]"#
-                listOf = #"[data-auto-search="1"]"#
+                if search == "popup" { listOf = #"[data-auto-search="1"]"# }
             }
         }
         var queries = [answer]
         if typeIn != nil, let short = answer.split(whereSeparator: { $0 == "," || $0 == "(" }).first.map({ String($0).trimmed }), !short.isEmpty, short != answer {
             queries.append(short)
         }
+        // A state's code finds nothing in some searches (Zoho's "State/Province" for "TX"): its name too.
+        if typeIn != nil, answer.trimmed.count == 2, let name = LinkedIn.usStates[answer.trimmed.uppercased()] { queries.append(name) }
+        // A decline the list words its own way (Pinpoint's searchable lists find nothing for "Decline to self-identify";
+        // they have "Prefer not to say"): the whole list, unsearched.
+        if typeIn != nil, !multi, isDecline(answer) { queries.append("") }
         for q in queries {
             if let typeIn { await fill(typeIn, q, keepFocus: true) }
+            // Nothing typed opens nothing (react-select): the Down arrow shows the whole list.
+            if q.isEmpty, let typeIn { await press(.down, selector: typeIn) }
             try? await sleep(0.9)
             // Suggestions fetched from the server can take a moment to show.
             var options: [String] = []
@@ -250,8 +401,14 @@ extension WebAgent {
                 if !choices.isEmpty { break }
                 try? await sleep(0.6)
             }
+            if ProcessInfo.processInfo.environment["AA_TRACE_FILL"] != nil {
+                Log.info("TRACE list “\(f.spec.label.prefix(30))” for “\(q.prefix(30))”: \(options.prefix(8))")
+            }
             guard !choices.isEmpty else { continue }
             var choice = matchOption(answer, choices) ?? matchOption(q, choices) ?? TimeZones.match(answer, choices)
+            // A box that takes a name it doesn't list (Tom Select's "Add Acme Corp…" in Dropbox's Company): that row,
+            // rather than another name the search found.
+            if choice == nil, !multi, let add = choices.first(where: { Self.addsTyped($0, answer) || Self.addsTyped($0, q) }) { choice = add }
             // A long list that draws only the rows in view and doesn't narrow as you type: scroll it to the answer (only the
             // answer itself: a near match in part of the list, "United Kingdom", isn't it).
             if choice == nil, await bool(Scripts.scrollToOption, ["sel": listOf, "want": [answer, q]]) {
@@ -284,16 +441,16 @@ extension WebAgent {
                 // Already the chosen row (a list that shows its choice elsewhere): pressing it again could undo it.
                 if await bool(#"const e = document.querySelector(sel); return !!e && (e.getAttribute('aria-selected') === 'true' || e.getAttribute('aria-checked') === 'true');"#,
                               ["sel": #"[data-auto-choice="\#(j)"]"#]) {
-                    await press(.escape)
+                    await closeList(f.selector)
                     return true
                 }
                 await scriptClick(#"[data-auto-choice="\#(j)"]"#)
                 if await choiceTook(f, choice) { return true }
             }
-            await press(.escape)
+            await closeList(f.selector)
             return false
         }
-        if multi, let typeIn { await fill(typeIn, "", keepFocus: false) } else { await press(.escape) }
+        if multi, let typeIn { await fill(typeIn, "", keepFocus: false) } else { await closeList(f.selector) }
         // An address box that suggests addresses as you type but takes any (Paylocity's "Address Line 1"): the
         // address as typed.
         if !multi, f.isInput, Regex(#"\b(address|street)\b"#).matches(norm(f.spec.label)), await fill(f.selector, answer) {
@@ -313,7 +470,7 @@ extension WebAgent {
             const el = document.querySelector(sel);
             if (!el || !el.isConnected) return null;
             const clean = s => (s || '').replace(/\\s+/g, ' ').trim();
-            const SV = '[class*="single-value" i], [class*="singleValue" i], [class*="selected-value" i], [data-automation-id="selectedItem"]';
+            const SV = '[class*="single-value" i], [class*="singleValue" i], [class*="selected-value" i], [data-automation-id="selectedItem"], .ts-control > .item';
             const sv = [el.closest('[aria-owns], [aria-controls], [aria-haspopup]'), el.labels && el.labels[0], el.parentElement && el.parentElement.parentElement]
               .filter(Boolean).map(x => x.querySelector(SV)).find(x => x && clean(x.innerText));
             if (sv) return clean(sv.innerText);
@@ -326,8 +483,43 @@ extension WebAgent {
         return !(key(text) == key(f.spec.currentValue) && !f.spec.currentValue.isEmpty)
     }
 
+    /// A phone box with its own country list (Workable's intl-tel-input, which picks the country from where the
+    /// computer is, "Peru (+51)", then reads a US number's "51" as Peru's code): the number's own country picked there
+    /// first. `code` is the dialing code ("+1"), `names` the profile country's names. Returns the country picked, or nil
+    /// when the box has no such list or already shows the code.
+    public func matchPhoneCountry(_ f: FormField, code: String, names: [String]) async -> String? {
+        let digits = code.filter(\.isNumber)
+        guard !digits.isEmpty else { return nil }
+        let args: [String: Any] = ["sel": f.selector, "code": digits, "names": names]
+        guard let open = (try? await js(Scripts.phoneCountryPicker, args.merging(["pick": false]) { $1 })) as? [String: Any],
+              let want = open["want"] as? String, !want.isEmpty else { return nil }
+        try? await sleep(0.5)
+        let now = (try? await js(Scripts.phoneCountryPicker, args.merging(["pick": true]) { $1 })) as? [String: Any]
+        try? await sleep(0.4)
+        // The list closes itself on a choice; one left open is closed.
+        if now?["open"] as? Bool == true { await press(.escape) }
+        guard let shown = now?["shown"] as? String, shown.hasSuffix("(+\(digits))") else {
+            Log.info("Couldn't set the phone's country to \(want) (the box shows \(open["shown"] as? String ?? "?"))")
+            return nil
+        }
+        let name = want.replacingOccurrences(of: #"\s*\(?\+\d+\)?\s*$"#, with: "", options: .regularExpression)
+        return "\(name) (+\(digits))"
+    }
+
+    /// The resume set on a box the page keeps hidden until a button opens it (see `Scripts.tagHiddenResumeBox`).
+    public func attachToHiddenResumeBox(_ file: URL) async -> Bool {
+        guard await bool(Scripts.tagHiddenResumeBox, ["fileName": file.lastPathComponent]) else { return false }
+        return await setFiles(#"[data-auto-hidden-file="1"]"#, [file])
+    }
+
     public func upload(_ f: FormField, _ file: URL) async -> Bool {
-        await setFiles(f.selector, [file])
+        if await setFiles(f.selector, [file]) { return true }
+        // The page drew the box again since it was read (Greenhouse's form at HubSpot redrew itself mid-fill), losing
+        // the app's mark: the box found again by its own id or name.
+        func quoted(_ s: String) -> String { "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\"" }
+        if !f.htmlID.isEmpty, await setFiles("input[type=file][id=\(quoted(f.htmlID))]", [file]) { return true }
+        if !f.name.isEmpty, await setFiles("input[type=file][name=\(quoted(f.name))]", [file]) { return true }
+        return false
     }
 
     public func collectErrors(root: String? = nil) async -> [String: String] {
@@ -338,8 +530,9 @@ extension WebAgent {
 
     /// Finds the last visible enabled button whose name matches `pattern` (case-insensitive). Returns its name and
     /// tags it so `clickFoundButton` can press it.
-    public func findButton(_ pattern: String, root: String? = nil) async -> String? {
-        var args: [String: Any] = ["pattern": pattern, "flags": "i", "rootSel": NSNull()]
+    /// `skipSignUps`: leave out the Submit of a job-alert or talent-community sign-up beside the job.
+    public func findButton(_ pattern: String, root: String? = nil, skipSignUps: Bool = false) async -> String? {
+        var args: [String: Any] = ["pattern": pattern, "flags": "i", "rootSel": NSNull(), "skipSignUps": skipSignUps]
         if let root { args["rootSel"] = root }
         return (try? await js(Scripts.findButton, args)) as? String
     }
@@ -364,12 +557,17 @@ extension WebAgent {
     @discardableResult
     public func dismissBanners() async -> [String] {
         var pressed: [String] = []
-        for _ in 0..<3 {
-            let name = await string(Scripts.tagBannerButton)
-            guard !name.isEmpty else { break }
+        var manage = true
+        for _ in 0..<4 {
+            guard let hit = (try? await js(Scripts.tagBannerButton, ["allowManage": manage])) as? [String: Any],
+                  let name = hit["name"] as? String else { break }
+            // The choices are opened once: a panel that offers no way to decline is then accepted. (OneTrust's fades in
+            // over a second, with its banner's "Accept All Cookies" still shown behind it.)
+            let opening = hit["kind"] as? String == "manage"
+            if opening { manage = false }
             await click(#"[data-auto-banner="1"]"#)
             pressed.append(name)
-            try? await sleep(0.6)
+            try? await sleep(opening ? 2 : 0.6)
         }
         if !pressed.isEmpty { Log.info("Closed a cookie or privacy banner (\(pressed.joined(separator: ", ")))") }
         return pressed
@@ -410,6 +608,11 @@ extension WebAgent {
         return PageKind(kind: PageKind.Kind(rawValue: r["kind"] as? String ?? "") ?? .page, fields: (r["fields"] as? NSNumber)?.intValue ?? 0,
                         passwords: (r["passwords"] as? NSNumber)?.intValue ?? 0, text: r["text"] as? String ?? "",
                         bare: (r["bare"] as? Bool) ?? false, puzzle: (r["puzzle"] as? Bool) ?? false, upload: (r["upload"] as? Bool) ?? false)
+    }
+
+    /// The address a page's "Apply via email" link writes to, when it has one.
+    public func applyByEmailAddress() async -> String? {
+        ((try? await js(Scripts.applyByEmail)) as? String).flatMap { $0.contains("@") ? $0 : nil }
     }
 
     /// An "I'm not a robot" box on the page. The app never ticks one: only the user may.
