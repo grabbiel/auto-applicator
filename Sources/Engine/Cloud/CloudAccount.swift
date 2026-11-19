@@ -8,8 +8,10 @@ public struct CloudConfig: Codable, Sendable, Equatable {
     public var clientId: String
     public var signInHost: String
     public var identityPoolId: String
-    public var browserId: String
-    public var browserProfileId: String
+    /// The one browser and cookie profile everyone shared, in a cloud set up before each person had their own
+    /// (`CloudAccount.place`). Newer files leave them out: each account names its own.
+    public var browserId: String?
+    public var browserProfileId: String?
     /// Google and Apple, when the sign-in page offers them ("Google", "SignInWithApple"); missing in older files.
     public var signInProviders: [String]?
     /// The cloud AI: the function only a signed-in user may call, and the model behind it ("us.amazon.nova-2-lite-v1:0").
@@ -118,14 +120,30 @@ public enum CloudError: LocalizedError, Equatable {
     }
 }
 
+/// A person's own Chrome in the cloud and the cookies it keeps between sessions. The AWS account that runs the cloud
+/// lets a sign-in use only the two made for it.
+public struct CloudPlace: Sendable, Equatable {
+    public var browserId: String
+    public var profileId: String
+
+    public init(browserId: String, profileId: String) {
+        self.browserId = browserId
+        self.profileId = profileId
+    }
+}
+
 /// The invited person using the cloud browser: signs in on the hosted page (password, passkey, Google or Apple), keeps
-/// the sign-in (a refresh token, good for 30 days), and trades it for AWS credentials that can only use the browser.
+/// the sign-in (a refresh token, good for 30 days), and trades it for AWS credentials that can only use their own
+/// browser.
 public actor CloudAccount {
     public nonisolated let config: CloudConfig
     private var refreshToken: String?
     private var idToken: (token: String, expires: Date)?
     private var identityId: String?
     private var cached: AWSCredentials?
+    /// For asking Cognito about this account itself (the sign-in's "user.admin" scope); renewed with the ID token.
+    private var accessToken: String?
+    private var knownPlace: CloudPlace?
     /// Called whenever the stored sign-in changes (nil = signed out) so the app can save it.
     private let onChange: @Sendable (String?) -> Void
 
@@ -185,6 +203,7 @@ public actor CloudAccount {
         refreshToken = refresh
         identityId = nil
         cached = nil
+        knownPlace = nil
         try remember(tokens)
         onChange(refresh)
         return email ?? ""
@@ -206,9 +225,62 @@ public actor CloudAccount {
         }
         refreshToken = nil
         idToken = nil
+        accessToken = nil
+        knownPlace = nil
         identityId = nil
         cached = nil
         onChange(nil)
+    }
+
+    // MARK: what this sign-in may use
+
+    /// The signed-in person's own browser and cookie profile, as their account names them.
+    public func place() async throws -> CloudPlace {
+        if let own = try await ownPlace() { return own }
+        // A cloud from before each person had their own: everyone used the one the app's file names.
+        if let browser = config.browserId, let profile = config.browserProfileId, !browser.isEmpty, !profile.isEmpty {
+            return CloudPlace(browserId: browser, profileId: profile)
+        }
+        throw CloudError.failed("Your cloud browser isn't set up yet. Ask whoever invited you to update the cloud (scripts/deploy_cloud.sh).")
+    }
+
+    /// Whether whoever runs the cloud lets this sign-in ask the cloud AI (they choose per person). Nil when that
+    /// can't be found out right now (offline, or signed out).
+    public func mayAskCloudAI() async -> Bool? {
+        do {
+            let token = try await currentIDToken()
+            return Self.mayAskCloudAI(Self.claims(token), hasOwnPlace: try await ownPlace() != nil)
+        } catch {
+            return nil
+        }
+    }
+
+    /// What the account says is this person's: the app asks Cognito for its own account's attributes (a sign-in's
+    /// token doesn't carry them). Nil in a cloud from before each person had a browser of their own.
+    private func ownPlace() async throws -> CloudPlace? {
+        if let knownPlace { return knownPlace }
+        _ = try await currentIDToken()  // also renews the access token
+        guard let accessToken else { return nil }
+        knownPlace = Self.ownPlace(Self.attributes(try await cognitoUser("GetUser", ["AccessToken": accessToken])))
+        return knownPlace
+    }
+
+    /// Cognito's {"UserAttributes": [{"Name": …, "Value": …}]}.
+    static func attributes(_ reply: [String: Any]) -> [String: String] {
+        Dictionary(((reply["UserAttributes"] as? [[String: Any]]) ?? []).compactMap { item in
+            (item["Name"] as? String).flatMap { name in (item["Value"] as? String).map { (name, $0) } }
+        }, uniquingKeysWith: { first, _ in first })
+    }
+
+    static func ownPlace(_ attributes: [String: String]) -> CloudPlace? {
+        guard let browser = attributes["custom:browser"], let profile = attributes["custom:profile"], !browser.isEmpty, !profile.isEmpty else { return nil }
+        return CloudPlace(browserId: browser, profileId: profile)
+    }
+
+    static func mayAskCloudAI(_ claims: [String: Any], hasOwnPlace: Bool) -> Bool {
+        // A cloud from before each person had their own browser let every sign-in ask.
+        guard hasOwnPlace else { return true }
+        return (claims["cognito:groups"] as? [String] ?? []).contains("cloud-ai")
     }
 
     // MARK: AWS credentials
@@ -252,6 +324,7 @@ public actor CloudAccount {
         guard let id = tokens["id_token"] as? String else { throw CloudError.failed("No ID token was returned.") }
         let exp = (Self.claims(id)["exp"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) } ?? Date().addingTimeInterval(3000)
         idToken = (id, exp)
+        accessToken = tokens["access_token"] as? String
     }
 
     // MARK: HTTP
@@ -265,6 +338,22 @@ public actor CloudAccount {
         let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {
             throw CloudError.failed("Sign-in failed (\(json["error"] as? String ?? "HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)")).")
+        }
+        return json
+    }
+
+    /// A call about the signed-in account itself, authorized by its access token (no AWS credentials involved).
+    private func cognitoUser(_ action: String, _ body: [String: Any]) async throws -> [String: Any] {
+        var req = URLRequest(url: URL(string: "https://cognito-idp.\(config.region).amazonaws.com/")!)
+        req.httpMethod = "POST"
+        req.setValue("application/x-amz-json-1.1", forHTTPHeaderField: "Content-Type")
+        req.setValue("AWSCognitoIdentityProviderService.\(action)", forHTTPHeaderField: "X-Amz-Target")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await URLSession.shared.data(for: req)
+        let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            if (json["__type"] as? String)?.contains("NotAuthorized") == true { throw CloudError.signedOut }
+            throw CloudError.failed("The cloud account couldn't be read: \(json["message"] as? String ?? json["__type"] as? String ?? "unknown error").")
         }
         return json
     }

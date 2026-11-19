@@ -5,11 +5,12 @@ import PDFKit
 /// A Chrome running in AWS (Amazon Bedrock AgentCore Browser), driven over the Chrome DevTools protocol.
 ///
 /// `WebAgent(cloud:)` routes its basic operations here (scripts, navigation, mouse and keys, pictures, cookies), so
-/// everything built on them — form filling, the site handlers — works the same in the cloud. Cookies are kept between
-/// sessions in a browser profile; LinkedIn's are copied over from the built-in browser at the start of each session.
+/// everything built on them — form filling, the site handlers — works the same in the cloud. Each person has a browser
+/// and a cookie profile of their own (`CloudPlace`); cookies are kept between sessions in the profile.
 @MainActor
 public final class CloudBrowser {
     public let config: CloudConfig
+    public let place: CloudPlace
     private let credentials: @Sendable () async throws -> AWSCredentials
     public private(set) var sessionId: String?
     private var lastCredentials: AWSCredentials?
@@ -32,8 +33,9 @@ public final class CloudBrowser {
     /// The page opened a new window; its address loads in the main page (the same as the built-in browser).
     var popupOpened: ((URL) -> Void)?
 
-    private init(config: CloudConfig, credentials: @escaping @Sendable () async throws -> AWSCredentials) {
+    private init(config: CloudConfig, place: CloudPlace, credentials: @escaping @Sendable () async throws -> AWSCredentials) {
         self.config = config
+        self.place = place
         self.credentials = credentials
     }
 
@@ -41,15 +43,17 @@ public final class CloudBrowser {
 
     // MARK: session
 
-    /// Starts a session (ending on its own after `timeout` at the latest) and attaches to its page.
+    /// Starts a session in the signed-in person's own browser (ending on its own after `timeout` at the latest) and
+    /// attaches to its page.
     public static func start(account: CloudAccount, timeout: TimeInterval = 3600) async throws -> CloudBrowser {
-        try await start(config: account.config, credentials: { try await account.credentials() }, timeout: timeout)
+        let place = try await account.place()
+        return try await start(config: account.config, place: place, credentials: { try await account.credentials() }, timeout: timeout)
     }
 
-    /// The same with any source of credentials (tests use an administrator's, and leave the saved cookies alone).
-    public static func start(config: CloudConfig, credentials: @escaping @Sendable () async throws -> AWSCredentials,
+    /// The same with any browser and source of credentials (tests use an administrator's and a browser of their own).
+    public static func start(config: CloudConfig, place: CloudPlace, credentials: @escaping @Sendable () async throws -> AWSCredentials,
                              timeout: TimeInterval = 3600, useProfile: Bool = true) async throws -> CloudBrowser {
-        let browser = CloudBrowser(config: config, credentials: credentials)
+        let browser = CloudBrowser(config: config, place: place, credentials: credentials)
         try await browser.open(timeout: timeout, useProfile: useProfile)
         return browser
     }
@@ -60,8 +64,8 @@ public final class CloudBrowser {
             "sessionTimeoutSeconds": Int(min(28_800, max(900, timeout))),
             "viewPort": ["width": Int(WebAgent.viewport.width), "height": Int(WebAgent.viewport.height)],
         ]
-        if useProfile { body["profileConfiguration"] = ["profileIdentifier": config.browserProfileId] }
-        let r = try await rest("PUT", "/browsers/\(config.browserId)/sessions/start", body: body)
+        if useProfile { body["profileConfiguration"] = ["profileIdentifier": place.profileId] }
+        let r = try await rest("PUT", "/browsers/\(place.browserId)/sessions/start", body: body)
         guard let id = r["sessionId"] as? String,
               let stream = ((r["streams"] as? [String: Any])?["automationStream"] as? [String: Any])?["streamEndpoint"] as? String,
               let streamURL = URL(string: stream) else {
@@ -133,14 +137,14 @@ public final class CloudBrowser {
         sessionId = nil
         if saveProfile {
             do {
-                _ = try await rest("PUT", "/browser-profiles/\(config.browserProfileId)/save",
-                                   body: ["browserIdentifier": config.browserId, "sessionId": id])
+                _ = try await rest("PUT", "/browser-profiles/\(place.profileId)/save",
+                                   body: ["browserIdentifier": place.browserId, "sessionId": id])
             } catch {
                 Log.warn("Couldn't save the cloud browser's cookies: \(error.localizedDescription)")
             }
         }
         do {
-            _ = try await rest("PUT", "/browsers/\(config.browserId)/sessions/stop", query: [.init(name: "sessionId", value: id)], body: [:])
+            _ = try await rest("PUT", "/browsers/\(place.browserId)/sessions/stop", query: [.init(name: "sessionId", value: id)], body: [:])
             Log.info("Cloud browser session \(id) stopped")
         } catch {
             Log.warn("Couldn't stop cloud browser session \(id): \(error.localizedDescription)")
@@ -152,7 +156,7 @@ public final class CloudBrowser {
     public func stopBeforeExit(timeout: TimeInterval = 2) {
         guard let id = sessionId, let creds = lastCredentials, creds.isFresh else { closeSocket(); return }
         sessionId = nil
-        var c = URLComponents(url: endpoint.appendingPathComponent("browsers/\(config.browserId)/sessions/stop"), resolvingAgainstBaseURL: false)!
+        var c = URLComponents(url: endpoint.appendingPathComponent("browsers/\(place.browserId)/sessions/stop"), resolvingAgainstBaseURL: false)!
         c.queryItems = [.init(name: "sessionId", value: id)]
         var req = URLRequest(url: c.url!)
         req.httpMethod = "PUT"
@@ -205,7 +209,12 @@ public final class CloudBrowser {
         let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(status) else {
+            // Whoever runs the cloud revoked this sign-in, or removed its browser. (AWS's own words name their account.)
             let message = json["message"] as? String ?? json["Message"] as? String ?? "HTTP \(status)"
+            if status == 403 {
+                Log.warn("The cloud browser refused (403): \(message)")
+                throw BrowserError("The cloud browser isn't open to this sign-in any more. Ask whoever invited you.")
+            }
             throw BrowserError("The cloud browser refused: \(message)")
         }
         return json

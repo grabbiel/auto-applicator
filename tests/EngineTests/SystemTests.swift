@@ -255,6 +255,36 @@ final class SigV4Tests: XCTestCase {
         XCTAssertEqual(CloudError.signIn("access_denied", description: nil), .failed("access_denied"))
     }
 
+    /// Each person has a browser and a cookie profile of their own, which their account names (the app asks Cognito for
+    /// its own account's attributes); the cloud AI is for the people whoever runs the cloud put in its group.
+    func testASignInNamesItsOwnBrowser() throws {
+        let reply: [String: Any] = ["Username": "u1", "UserAttributes": [
+            ["Name": "sub", "Value": "1"], ["Name": "email", "Value": "a@example.com"],
+            ["Name": "custom:browser", "Value": "aa_1-AbC"], ["Name": "custom:profile", "Value": "aa_1-XyZ"]]]
+        let invited = CloudAccount.attributes(reply)
+        XCTAssertEqual(CloudAccount.ownPlace(invited), CloudPlace(browserId: "aa_1-AbC", profileId: "aa_1-XyZ"))
+        XCTAssertNil(CloudAccount.ownPlace(["custom:browser": "aa_1-AbC"]), "half of it is none of it")
+        XCTAssertNil(CloudAccount.ownPlace(CloudAccount.attributes(["UserAttributes": [["Name": "sub", "Value": "1"]]])))
+        XCTAssertNil(CloudAccount.ownPlace(CloudAccount.attributes([:])))
+
+        func claims(_ claims: [String: Any]) throws -> [String: Any] {
+            CloudAccount.claims("e30." + (try JSONSerialization.data(withJSONObject: claims)).base64URL + ".sig")
+        }
+        let plain = try claims(["sub": "1", "email": "a@example.com", "cognito:groups": ["us-east-1_pool_Google"]])
+        XCTAssertFalse(CloudAccount.mayAskCloudAI(plain, hasOwnPlace: true), "the cloud AI is off until it's turned on for someone")
+        XCTAssertFalse(CloudAccount.mayAskCloudAI(try claims(["sub": "1"]), hasOwnPlace: true))
+        let allowed = try claims(["sub": "1", "cognito:groups": ["us-east-1_pool_Google", "cloud-ai"]])
+        XCTAssertTrue(CloudAccount.mayAskCloudAI(allowed, hasOwnPlace: true))
+        // A cloud from before this (the app's file names the one shared browser): everyone could ask.
+        XCTAssertTrue(CloudAccount.mayAskCloudAI(plain, hasOwnPlace: false))
+
+        // The app's file no longer names a browser.
+        let new = #"{"region":"us-east-1","userPoolId":"p","clientId":"c","signInHost":"h.example.com","identityPoolId":"i"}"#
+        let config = try JSONDecoder().decode(CloudConfig.self, from: Data(new.utf8))
+        XCTAssertNil(config.browserId)
+        XCTAssertNil(config.browserProfileId)
+    }
+
     func testSignInRequestAndProviders() throws {
         let old = #"{"region":"us-east-1","userPoolId":"p","clientId":"c","signInHost":"h.example.com","identityPoolId":"i","browserId":"b","browserProfileId":"f"}"#
         let config = try JSONDecoder().decode(CloudConfig.self, from: Data(old.utf8))  // a file from before Google and Apple
@@ -333,24 +363,18 @@ final class CloudSessionTests: XCTestCase {
     }
 
     func testProfileKeepsCookiesBetweenSessions() async throws {
-        let probe = try await makeCloudTestAgent()  // checks the environment; no profile
-        await probe.cloud?.stop(saveProfile: false)
-        let env = ProcessInfo.processInfo.environment
-        let creds = AWSCredentials(accessKeyId: env["AWS_ACCESS_KEY_ID"]!, secretAccessKey: env["AWS_SECRET_ACCESS_KEY"]!,
-                                   sessionToken: env["AWS_SESSION_TOKEN"], expiration: .distantFuture)
-        let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let config = try JSONDecoder().decode(CloudConfig.self, from: Data(contentsOf: repo.appendingPathComponent("Resources/CloudConfig.json")))
+        let (config, place, creds) = try cloudTestSetup()  // the tests' own browser and cookie profile
         let value = UUID().uuidString
         let cookie = HTTPCookie(properties: [.name: "aa_probe", .value: value, .domain: ".example.com", .path: "/", .secure: "TRUE",
                                              .expires: Date().addingTimeInterval(600)])!
 
-        let first = try await CloudBrowser.start(config: config, credentials: { creds }, timeout: 900)
+        let first = try await CloudBrowser.start(config: config, place: place, credentials: { creds }, timeout: 900)
         await first.setCookies([cookie])
         let set = await first.cookies(for: "example.com")
         XCTAssertEqual(set.first { $0.name == "aa_probe" }?.value, value)
         await first.stop()  // saves the profile
 
-        let second = try await CloudBrowser.start(config: config, credentials: { creds }, timeout: 900)
+        let second = try await CloudBrowser.start(config: config, place: place, credentials: { creds }, timeout: 900)
         let kept = await second.cookies(for: "example.com")
         XCTAssertEqual(kept.first { $0.name == "aa_probe" }?.value, value, "the profile brought the cookie back")
         _ = try? await second.call("Storage.deleteCookies", ["name": "aa_probe", "domain": ".example.com"], onPage: false)

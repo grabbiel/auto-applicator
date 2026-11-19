@@ -66,9 +66,9 @@ public struct CloudModel: LanguageModel {
             let message = (json?["message"] ?? json?["Message"]) as? String ?? ""
             switch status {
             case 401, 403:
-                throw AIError.unavailable("This cloud sign-in may not use the cloud AI. Run scripts/deploy_cloud.sh again, rebuild the app, and sign in again. \(message)")
+                throw AIError.unavailable("The cloud AI isn't turned on for this sign-in. Whoever runs the cloud browser chooses who may ask it (scripts/deploy_cloud.sh --cloud-ai).")
             case 404:
-                throw AIError.unavailable("The cloud AI isn't set up in your AWS account. Run scripts/deploy_cloud.sh, then rebuild the app.")
+                throw AIError.unavailable("The cloud AI isn't set up in the cloud browser's AWS account (scripts/deploy_cloud.sh sets it up).")
             case 429:
                 throw AIError.server(Self.busy)
             default:

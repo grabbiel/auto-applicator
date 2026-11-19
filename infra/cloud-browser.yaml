@@ -2,9 +2,10 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   Auto Applicator cloud browser. A managed Chrome (Amazon Bedrock AgentCore Browser) the app can drive instead of
   its built-in browser, plus an invite-only sign-in (password, passkey, Google or Apple) that hands the app
-  short-lived AWS credentials allowed to do nothing but use that browser and ask its cloud AI (a model on Amazon
-  Bedrock, for form questions the on-device AI couldn't answer). Idle cost is zero: the browser is billed only while a
-  session runs, the AI only per question.
+  short-lived AWS credentials allowed to do nothing but use the signed-in person's own browser (each invited person
+  gets a browser and a cookie profile nobody else can reach) and, for the people you allow it, ask its cloud AI (a
+  model on Amazon Bedrock, for form questions the on-device AI couldn't answer). Idle cost is zero: a browser is
+  billed only while a session runs, the AI only per question.
 
 Parameters:
   DomainPrefix:
@@ -18,6 +19,13 @@ Parameters:
     Default: "false"
     AllowedValues: ["true", "false"]
   AppleSignIn:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  # Each account names the browser and the cookie profile made for it in two attributes (custom:browser and
+  # custom:profile). CloudFormation can't add attributes to a pool that's in use, so scripts/deploy_cloud.sh adds them
+  # and then turns this on, which lets the app read them from its sign-in.
+  PlaceAttributes:
     Type: String
     Default: "false"
     AllowedValues: ["true", "false"]
@@ -47,6 +55,7 @@ Conditions:
   HasApple: !Equals [!Ref AppleSignIn, "true"]
   HasBoth: !And [!Condition HasGoogle, !Condition HasApple]
   HasSocial: !Or [!Condition HasGoogle, !Condition HasApple]
+  HasPlaceAttributes: !Equals [!Ref PlaceAttributes, "true"]
 
 Resources:
   # ---- Sign-in -------------------------------------------------------------------------------------------------
@@ -128,6 +137,14 @@ Resources:
         RefreshToken: days
       EnableTokenRevocation: true
       PreventUserExistenceErrors: ENABLED
+      # What the app may read from its own account: its address, and which browser and cookie profile are its own
+      # (an app client can't read attributes added to the pool later unless it's told so). It can't write those two:
+      # an app client writes only the standard attributes unless told otherwise, and the tag on the browser is the
+      # lock in any case.
+      ReadAttributes: !If
+        - HasPlaceAttributes
+        - [email, email_verified, "custom:browser", "custom:profile"]
+        - !Ref AWS::NoValue
 
   SignInBranding:
     Type: AWS::Cognito::ManagedLoginBranding
@@ -260,10 +277,50 @@ Resources:
         - Key: App
           Value: !Ref AppTag
 
+  # Every sign-in's credentials carry whose they are, as the tag "person" (the account's permanent ID). The policy
+  # below allows a browser or a cookie profile only when it carries the same tag, so nobody can start, stop or save
+  # another person's. scripts/deploy_cloud.sh makes each invited person a browser and a profile tagged that way
+  # (CloudFormation can't make one per invitation), and re-tags them "revoked" to lock someone out at once.
+  PersonTag:
+    Type: AWS::Cognito::IdentityPoolPrincipalTag
+    Properties:
+      IdentityPoolId: !Ref Identities
+      IdentityProviderName: !GetAtt Users.ProviderName
+      UseDefaults: false
+      PrincipalTags:
+        person: sub
+
+  OwnBrowser:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: "Auto Applicator: use the cloud browser and the cookie profile tagged as yours, nothing else."
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: OwnBrowserAndCookies
+            Effect: Allow
+            Action:
+              - bedrock-agentcore:StartBrowserSession
+              - bedrock-agentcore:StopBrowserSession
+              - bedrock-agentcore:SaveBrowserSessionProfile
+            Resource:
+              - !Sub "arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:browser-custom/*"
+              - !Sub "arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:browser-profile/*"
+            Condition:
+              StringEquals:
+                "aws:ResourceTag/person": "${aws:PrincipalTag/person}"
+          # Driving a started session. AWS gives this action no resource to name or tag, so what keeps it to one's
+          # own sessions is that a session ID is long, random, and only handed to whoever started the session:
+          # nobody here may list sessions or read one's details.
+          - Sid: DriveASession
+            Effect: Allow
+            Action: bedrock-agentcore:ConnectBrowserAutomationStream
+            Resource: "*"
+
   BrowserUserRole:
     Type: AWS::IAM::Role
     Properties:
-      Description: "What a signed-in Auto Applicator user may do: use the cloud browser and ask its cloud AI, nothing else."
+      Description: "What an invited Auto Applicator user may do: use their own cloud browser, nothing else."
       MaxSessionDuration: 3600
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
@@ -274,31 +331,33 @@ Resources:
             Condition:
               StringEquals: { "cognito-identity.amazonaws.com:aud": !Ref Identities }
               ForAnyValue:StringLike: { "cognito-identity.amazonaws.com:amr": authenticated }
+      ManagedPolicyArns: [!Ref OwnBrowser]
+      Tags:
+        - Key: App
+          Value: !Ref AppTag
+
+  # The same plus the cloud AI, for the people you put in the "cloud-ai" group
+  # (scripts/deploy_cloud.sh --cloud-ai <email> on). Nobody can add themselves to a group.
+  CloudAIUserRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: "An Auto Applicator user allowed the cloud AI: their own cloud browser and the form helper, nothing else."
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Federated: cognito-identity.amazonaws.com }
+            Action: [sts:AssumeRoleWithWebIdentity, sts:TagSession]
+            Condition:
+              StringEquals: { "cognito-identity.amazonaws.com:aud": !Ref Identities }
+              ForAnyValue:StringLike: { "cognito-identity.amazonaws.com:amr": authenticated }
+      ManagedPolicyArns: [!Ref OwnBrowser]
       Policies:
-        - PolicyName: use-cloud-browser
+        - PolicyName: ask-cloud-ai
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - Sid: Sessions
-                Effect: Allow
-                Action:
-                  - bedrock-agentcore:StartBrowserSession
-                  - bedrock-agentcore:SaveBrowserSessionProfile
-                Resource: [!GetAtt Browser.BrowserArn, !GetAtt BrowserProfile.ProfileArn]
-              - Sid: SessionControl
-                Effect: Allow
-                Action:
-                  - bedrock-agentcore:GetBrowserSession
-                  - bedrock-agentcore:StopBrowserSession
-                  - bedrock-agentcore:UpdateBrowserStream
-                Resource: !GetAtt Browser.BrowserArn
-              - Sid: Streams              # these actions have no resource type; a session id is still required
-                Effect: Allow
-                Action:
-                  - bedrock-agentcore:ConnectBrowserAutomationStream
-                  - bedrock-agentcore:ConnectBrowserLiveViewStream
-                  - bedrock-agentcore:ListBrowserSessions
-                Resource: "*"
               - Sid: CloudAI              # through the function only: never Bedrock itself
                 Effect: Allow
                 Action: lambda:InvokeFunction
@@ -307,39 +366,37 @@ Resources:
         - Key: App
           Value: !Ref AppTag
 
+  CloudAIGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      UserPoolId: !Ref Users
+      GroupName: cloud-ai
+      Description: May ask the cloud AI (scripts/deploy_cloud.sh --cloud-ai <email> on).
+
   IdentityRoles:
     Type: AWS::Cognito::IdentityPoolRoleAttachment
+    DependsOn: CloudAIGroup
     Properties:
       IdentityPoolId: !Ref Identities
       Roles:
         authenticated: !GetAtt BrowserUserRole.Arn
-
-  # ---- The browser ---------------------------------------------------------------------------------------------
-  Browser:
-    Type: AWS::BedrockAgentCore::BrowserCustom
-    Properties:
-      Name: auto_applicator_browser
-      Description: Chrome the Auto Applicator app drives when "Use the cloud browser" is on.
-      NetworkConfiguration:
-        NetworkMode: PUBLIC
-      RecordingConfig:
-        Enabled: false                    # application forms hold personal details: nothing is recorded
-      Tags:
-        App: !Ref AppTag
-
-  BrowserProfile:
-    Type: AWS::BedrockAgentCore::BrowserProfile
-    Properties:
-      Name: auto_applicator_profile
-      Description: Cookies kept between cloud sessions (stay signed in to LinkedIn and company sites).
-      Tags:
-        App: !Ref AppTag
+      RoleMappings:
+        people:
+          IdentityProvider: !Sub "${Users.ProviderName}:${AppClient}"
+          Type: Rules
+          AmbiguousRoleResolution: AuthenticatedRole    # not in the group: the browser only
+          RulesConfiguration:
+            Rules:
+              - Claim: "cognito:groups"
+                MatchType: Contains
+                Value: cloud-ai
+                RoleARN: !GetAtt CloudAIUserRole.Arn
 
   # ---- The cloud AI ---------------------------------------------------------------------------------------------
-  # A stronger model for the few form questions the on-device AI can't answer. Only a signed-in user's credentials
-  # (BrowserUserRole) may call this function, and the function may call only the one model, with a fixed answer
-  # shape and size. Prompts carry the candidate's details, so nothing logs them: the function logs token counts,
-  # and Bedrock's model invocation logging stays off.
+  # A stronger model for the few form questions the on-device AI can't answer. Only the credentials of a signed-in
+  # user you allowed it (CloudAIUserRole) may call this function, and the function may call only the one model, with
+  # a fixed answer shape and size. Prompts carry the candidate's details, so nothing logs them: the function logs
+  # token counts, and Bedrock's model invocation logging stays off.
   FormHelper:
     Type: AWS::Lambda::Function
     DependsOn: FormHelperLogs
@@ -492,10 +549,8 @@ Outputs:
     Value: !Sub "${DomainPrefix}.auth.${AWS::Region}.amazoncognito.com"
   IdentityPoolId:
     Value: !Ref Identities
-  BrowserId:
-    Value: !GetAtt Browser.BrowserId
-  BrowserProfileId:
-    Value: !GetAtt BrowserProfile.ProfileId
+  CloudAIGroup:
+    Value: cloud-ai
   ResourceGroup:
     Value: !Ref AppResources
   HelperFunction:

@@ -117,6 +117,10 @@ instead of in the app's own browser. This Mac still directs each run and its AI 
 browsing happens remotely. It's invite-only: an invited address signs in on a hosted page with its password, a
 passkey (Touch ID / iCloud Keychain), or, once you've set them up, Google or Apple, and stays signed in for 30 days.
 
+Each invited person gets a Chrome and a cookie profile of their own. Their sign-in can start, stop and save that one
+browser and nothing else in your AWS account: not another person's browser or cookies, not a list of who else uses
+it, and no other AWS service.
+
 Set it up in your AWS account with an admin profile, then rebuild the app so it knows where the browser is:
 
 ```bash
@@ -133,12 +137,29 @@ account, so it's ignored by git. `--invite` creates the sign-in account; Cognito
 temporary password. Then, in the app: **Settings › Cloud browser › Sign in**, choose a new password, and
 **Add a passkey** for next time.
 
-**Invitations.** Nobody can sign up. `--invite` again resends an invitation that hasn't been used; `--invites` lists
-who's invited and how each person signs in; `--revoke` stops someone at once (`--invite` lets them back):
+**Invitations.** Nobody can sign up. `--invite` creates the account and that person's browser, and again resends an
+invitation that hasn't been used. `--invites` lists who's invited and how each person signs in:
 
 ```bash
 bash scripts/deploy_cloud.sh --invites
 ```
+
+| | |
+|---|---|
+| `--revoke a@b.com` | Locks someone out now: no sign-in, their browser closes to the sign-in their app still holds, running sessions end. Their cookies are kept; `--invite` lets them back in. |
+| `--remove a@b.com` | Deletes the account, its browser and its saved cookies. |
+| `--stop a@b.com` | Ends the browser sessions someone has running. |
+| `--cloud-ai a@b.com on` | Lets someone ask the cloud AI too (`off` takes it back). |
+| `--tidy` | Deletes browsers and cookies whose account no longer exists. |
+
+An invited person's copy of the app has to know where your cloud is: give them a copy you built
+(`scripts/package.sh` includes `Resources/CloudConfig.json`), or have them save that file as
+`~/Library/Application Support/AutoApplicator/cloud.json` beside a public release (1.4.0 or newer: older versions
+only know the one browser everyone used to share).
+
+**The cloud AI.** For the few form questions the on-device AI can't answer, a run in the cloud browser can ask a
+stronger model on Amazon Bedrock, through one function that may call only that model. It's off for everyone until you
+turn it on for them (`--cloud-ai you@example.com on` for yourself); nobody can turn it on for themselves.
 
 **Google and Apple.** These add *Continue with Google* and *Continue with Apple* to the sign-in page. They're still
 invite-only: a first Google or Apple sign-in works only if its verified email has an invitation, and is then joined to
@@ -168,13 +189,14 @@ What it creates, all tagged `App=auto-applicator` (the resource group `auto-appl
 |---|---|
 | Cognito user pool, hosted sign-in domain, app client | Sign-in with password, passkey, Google or Apple; code + PKCE, no client secret; 30-day refresh token; no self sign-up |
 | Invite gate (Lambda function, its role and a 30-day log) | Lets a first Google or Apple sign-in in only for an invited address, and joins it to that account |
-| Cognito identity pool and an IAM role | Temporary AWS credentials that can only start, use, stop and save sessions of this one browser |
-| AgentCore custom browser and browser profile | Chrome sessions; the profile keeps cookies between runs |
+| Cognito identity pool and two IAM roles | Temporary AWS credentials tagged with whose they are, which can only start, drive, stop and save the browser and cookie profile carrying the same tag; the second role adds the cloud AI, for the people in the `cloud-ai` group |
+| Form helper (Lambda function, its role and a 30-day log) | The cloud AI: asks one Bedrock model, logs token counts and never the questions |
+| For each invited person: an AgentCore custom browser and browser profile | Their Chrome sessions; the profile keeps their cookies between runs. Made by the script, tagged with the person's account ID, nothing recorded |
 
 **Cost:** nothing while idle. A session is billed only while it runs (CPU and memory per second), Cognito is free
-for one user, and the invite gate runs only on a first Google or Apple sign-in. Each session ends after its run, or after a timeout matched to the run's size (1–8 hours).
+at this size, the invite gate runs only on a first Google or Apple sign-in, and the cloud AI is billed per question. Each session ends after its run, or after a timeout matched to the run's size (1–8 hours).
 
-**Remove it:**
+**Remove it:** `--remove` each person (their browsers aren't part of the stack), then
 
 ```bash
 aws cloudformation delete-stack --stack-name auto-applicator-cloud
@@ -201,7 +223,9 @@ Sources/Engine/          everything that isn't UI
   Data/ Model/ Resume/   SQLite, profile/settings/secrets, PDF reading and writing
   System/                launchd schedule, the helper-process supervisor
 Sources/AutoApplicator/  the SwiftUI app
+Sources/AdminKit/ Admin/ the cloud browser's admin tool (yours alone: see below)
 tests/EngineTests/       unit and browser tests against local HTML fixtures (no network)
+tests/AdminTests/        the admin tool's reading of AWS replies
 infra/                   CloudFormation for the cloud browser
 scripts/                 build, package, icon, disk-image background, cloud deploy, company directory
 Resources/Companies.tsv  large employers and their other names, from Wikidata (CC0; scripts/make_companies.py)
@@ -231,10 +255,26 @@ leave your cloud browser out of a copy for other people. With an Apple Developer
 `AA_SIGN_IDENTITY="Developer ID Application: …"` signs it and `AA_NOTARY_PROFILE=<notarytool profile>` also
 notarizes it, so it opens without the *Open Anyway* step.
 
-The form and handler tests also run against the real cloud browser when asked:
+The form and handler tests also run against the real cloud browser when asked, in a browser of their own that no
+sign-in can use (`--test-browser` makes it once):
+
+```bash
+bash scripts/deploy_cloud.sh --test-browser
+```
 
 ```bash
 eval "$(aws configure export-credentials --profile admin --format env)" && AA_CLOUD_TEST=1 swift test --filter Cloud
+```
+
+**The admin tool.** If you run a cloud browser for other people, `Auto Applicator Admin.app` shows it in one window:
+who's invited and how they sign in, each person's browser, sessions and hours, the stack and whether it's up to
+date, who may ask the cloud AI, and this month's bill. Inviting, revoking, removing, ending a session and updating
+the stack are buttons that run `scripts/deploy_cloud.sh`, so the app and the terminal can't disagree. It uses your
+AWS CLI's administrator profile and this project folder, so it's built for your Mac only and is never part of a
+release:
+
+```bash
+bash scripts/build_admin.sh
 ```
 
 **Helpers and quitting.** Every process the app starts (Ollama) runs under a small supervisor in its own process

@@ -16,6 +16,7 @@ Auto Applicator.app/
 
 # Where your cloud browser lives (scripts/deploy_cloud.sh writes it; the build bundles it). Account-specific.
 Resources/CloudConfig.json
+Resources/CloudTest.json
 
 # Never commit stray secrets dropped into the folder
 *api_key*

@@ -47,6 +47,8 @@ public struct Settings: Codable, Equatable, Sendable {
     public var cloudBrowser = false
     /// The cloud browser has a LinkedIn sign-in made inside it (LinkedIn ends sign-ins copied over from this Mac).
     public var cloudLinkedIn = false
+    /// Whoever runs the cloud lets this sign-in ask the cloud AI (they choose per person; checked at each sign-in).
+    public var cloudAIAllowed = true
     /// Look for new versions every few hours, download them, and install one when the app quits (README › Updates).
     public var autoUpdate = true
 
@@ -56,6 +58,7 @@ public struct Settings: Codable, Equatable, Sendable {
         case search, filters, limits, schedule, ai
         case practiceMode = "practice_mode", setupComplete = "setup_complete", tourComplete = "tour_complete"
         case cloudBrowser = "cloud_browser", cloudLinkedIn = "cloud_linkedin", autoUpdate = "auto_update"
+        case cloudAIAllowed = "cloud_ai_allowed"
     }
 
     public init(from decoder: Decoder) throws {
@@ -70,6 +73,7 @@ public struct Settings: Codable, Equatable, Sendable {
         tourComplete = (try? c.decodeIfPresent(Bool.self, forKey: .tourComplete)) ?? false
         cloudBrowser = (try? c.decodeIfPresent(Bool.self, forKey: .cloudBrowser)) ?? false
         cloudLinkedIn = (try? c.decodeIfPresent(Bool.self, forKey: .cloudLinkedIn)) ?? false
+        cloudAIAllowed = (try? c.decodeIfPresent(Bool.self, forKey: .cloudAIAllowed)) ?? true
         autoUpdate = (try? c.decodeIfPresent(Bool.self, forKey: .autoUpdate)) ?? true
     }
 }

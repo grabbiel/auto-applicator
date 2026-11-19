@@ -196,6 +196,7 @@ final class AppModel {
         // Set up before (or carried over from 0.3) but never shown the tour.
         if settings.setupComplete && !settings.tourComplete { tourStep = 0 }
         refreshData()
+        Task { await refreshCloudAccess() }
         // The directory of companies (for the list to skip) takes a moment to read; read it before it's needed.
         Task.detached(priority: .utility) { _ = CompanyDirectory.shared.companies.count }
         Log.info("App started (\(Bundle.main.bundleIdentifier ?? "no bundle"))")
@@ -556,7 +557,7 @@ final class AppModel {
                 let agent = try await self.makeRunBrowser()
                 browser = agent
                 self.runAgent = agent
-                let helper = self.runInCloud && self.settings.ai.cloudHelper ? self.makeCloudHelper() : nil
+                let helper = self.runInCloud && self.cloudHelperAvailable && self.settings.ai.cloudHelper ? self.makeCloudHelper() : nil
                 let runner = JobRunner(paths: self.paths, db: self.db, web: agent, ai: self.ai, helper: helper, practice: practice) { [weak self] event in
                     self?.handle(event)
                 }
