@@ -9,6 +9,8 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .executable(name: "AutoApplicator", targets: ["AutoApplicator"]),
+        // The owner's own tool for the cloud browser's AWS side (scripts/build_admin.sh). Releases don't include it.
+        .executable(name: "AutoApplicatorAdmin", targets: ["Admin"]),
     ],
     targets: [
         .target(
@@ -25,6 +27,10 @@ let package = Package(
             dependencies: ["Engine"],
             path: "Sources/AutoApplicator"
         ),
+        // The admin tool: `AdminKit` reads AWS through the AWS CLI and changes it through scripts/deploy_cloud.sh.
+        .target(name: "AdminKit", path: "Sources/AdminKit"),
+        .executableTarget(name: "Admin", dependencies: ["AdminKit"], path: "Sources/Admin"),
+        .testTarget(name: "AdminTests", dependencies: ["AdminKit"], path: "tests/AdminTests"),
         .testTarget(
             name: "EngineTests",
             dependencies: ["Engine"],

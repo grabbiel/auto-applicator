@@ -182,22 +182,34 @@ extension WebAgent {
     }
 }
 
-/// A cloud browser session for tests: AA_CLOUD_TEST=1 plus AWS credentials in the environment (e.g. from
-/// `aws configure export-credentials --profile admin --format env`) and Resources/CloudConfig.json. It never uses or
-/// saves the app's cookie profile.
-@MainActor
-func makeCloudTestAgent() async throws -> WebAgent {
+/// What the cloud tests need: AA_CLOUD_TEST=1, an administrator's AWS credentials in the environment (e.g. from
+/// `aws configure export-credentials --profile admin --format env`), Resources/CloudConfig.json, and a browser of the
+/// tests' own (Resources/CloudTest.json, from `scripts/deploy_cloud.sh --test-browser`): never a person's.
+func cloudTestSetup() throws -> (config: CloudConfig, place: CloudPlace, credentials: AWSCredentials) {
     let env = ProcessInfo.processInfo.environment
     guard env["AA_CLOUD_TEST"] == "1", let key = env["AWS_ACCESS_KEY_ID"], let secret = env["AWS_SECRET_ACCESS_KEY"] else {
         throw XCTSkip("Set AA_CLOUD_TEST=1 and AWS credentials to test the cloud browser.")
     }
-    let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-    guard let data = try? Data(contentsOf: repo.appendingPathComponent("Resources/CloudConfig.json")),
+    let resources = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        .appendingPathComponent("Resources")
+    guard let data = try? Data(contentsOf: resources.appendingPathComponent("CloudConfig.json")),
           let config = try? JSONDecoder().decode(CloudConfig.self, from: data) else {
         throw XCTSkip("No Resources/CloudConfig.json (run scripts/deploy_cloud.sh).")
     }
+    guard let data = try? Data(contentsOf: resources.appendingPathComponent("CloudTest.json")),
+          let ids = try? JSONDecoder().decode([String: String].self, from: data),
+          let browser = ids["browserId"], let profile = ids["browserProfileId"] else {
+        throw XCTSkip("No Resources/CloudTest.json (run scripts/deploy_cloud.sh --test-browser).")
+    }
     let creds = AWSCredentials(accessKeyId: key, secretAccessKey: secret, sessionToken: env["AWS_SESSION_TOKEN"], expiration: .distantFuture)
-    let cloud = try await CloudBrowser.start(config: config, credentials: { creds }, timeout: 900, useProfile: false)
+    return (config, CloudPlace(browserId: browser, profileId: profile), creds)
+}
+
+/// A cloud browser session for tests (see `cloudTestSetup`). It neither loads nor saves cookies.
+@MainActor
+func makeCloudTestAgent() async throws -> WebAgent {
+    let (config, place, creds) = try cloudTestSetup()
+    let cloud = try await CloudBrowser.start(config: config, place: place, credentials: { creds }, timeout: 900, useProfile: false)
     try await cloud.serve { url in
         if url.host == "fixtures.test" {
             return (try? Data(contentsOf: Fixture.url(url.lastPathComponent))).map { ($0, "text/html; charset=utf-8") }

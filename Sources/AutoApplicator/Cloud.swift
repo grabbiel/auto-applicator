@@ -11,8 +11,8 @@ extension AppModel {
     var cloudSignedIn: Bool { !secrets.cloudRefreshToken.isEmpty }
     /// The next run will use the cloud browser.
     var usesCloud: Bool { cloudAvailable && cloudSignedIn && settings.cloudBrowser }
-    /// This copy of the app knows the cloud AI (deployed with it).
-    var cloudHelperAvailable: Bool { !(cloudConfig?.helperFunction ?? "").isEmpty }
+    /// This copy of the app knows the cloud AI (deployed with it), and whoever runs the cloud lets this sign-in ask it.
+    var cloudHelperAvailable: Bool { !(cloudConfig?.helperFunction ?? "").isEmpty && settings.cloudAIAllowed }
     /// The next run will ask the cloud AI what the on-device AI can't answer.
     var usesCloudHelper: Bool { usesCloud && cloudHelperAvailable && settings.ai.cloudHelper }
 
@@ -30,6 +30,12 @@ extension AppModel {
         if token == nil { secrets.cloudEmail = "" }
     }
 
+    /// Asks the sign-in whether it may use the cloud AI: whoever runs the cloud turns that on per person.
+    func refreshCloudAccess() async {
+        guard cloudSignedIn, let allowed = await cloudAccount?.mayAskCloudAI() else { return }
+        if settings.cloudAIAllowed != allowed { settings.cloudAIAllowed = allowed }
+    }
+
     /// `provider` goes straight to Google or Apple instead of the sign-in page.
     func signInToCloud(provider: String? = nil) async {
         guard let account = cloudAccount else { return }
@@ -41,6 +47,7 @@ extension AppModel {
             cloudBusy = "Finishing sign-in…"
             secrets.cloudEmail = try await account.completeSignIn(request, callback: callback)
             settings.cloudBrowser = true
+            await refreshCloudAccess()
             show("Signed in. Runs now use the cloud browser.")
         } catch is CancellationError {
         } catch CloudError.joined(let joined) where provider == nil {
@@ -96,6 +103,7 @@ extension AppModel {
         do {
             let cloud = try await CloudBrowser.start(account: account, timeout: 900)
             let ready = Date().timeIntervalSince(started)
+            await refreshCloudAccess()
             let agent = WebAgent(cloud: cloud)
             cloudBusy = "Opening LinkedIn…"
             let recognized = await agent.linkedInSignedIn()
@@ -115,7 +123,7 @@ extension AppModel {
 
     /// Asks the cloud AI one made-up question with this sign-in's credentials, the way runs do (nil when it's off).
     private func checkCloudHelper() async -> (ok: Bool, message: String)? {
-        guard settings.ai.cloudHelper, let helper = makeCloudHelper() else { return nil }
+        guard cloudHelperAvailable, settings.ai.cloudHelper, let helper = makeCloudHelper() else { return nil }
         cloudBusy = "Asking the cloud AI…"
         let started = Date()
         do {
@@ -133,6 +141,7 @@ extension AppModel {
     func makeRunBrowser() async throws -> WebAgent {
         guard usesCloud, let account = cloudAccount else { return web }
         runPhase = "Starting Chrome in the cloud"
+        await refreshCloudAccess()
         let minutes = Double(settings.limits.maxAppliesPerRun) * 6
         let cloud = try await CloudBrowser.start(account: account, timeout: min(8 * 3600, max(3600, minutes * 60)))
         return WebAgent(cloud: cloud)
@@ -245,11 +254,11 @@ struct CloudBrowserView: View {
             if model.cloudSignedIn {
                 Divider().overlay(Palette.line)
                 ToggleRow(title: "Use the cloud browser for runs",
-                          detail: "This Mac still directs each run, so keep it awake. Your LinkedIn sign-in is carried over; nothing is recorded.",
+                          detail: "This Mac still directs each run, so keep it awake. The browser and the cookies it keeps are yours alone; nothing is recorded.",
                           isOn: $model.settings.cloudBrowser)
                 if model.cloudHelperAvailable {
                     ToggleRow(title: "Ask the cloud AI what the on-device AI can't answer",
-                              detail: "On runs in the cloud browser, questions the on-device AI isn't sure about go to \(model.cloudConfig?.helperName ?? "a stronger model") in your AWS account, with your profile minus your email and phone. Its answers follow the same rules (cite your profile, or ask you), are saved, and help the on-device AI from then on.",
+                              detail: "On runs in the cloud browser, questions the on-device AI isn't sure about go to \(model.cloudConfig?.helperName ?? "a stronger model") in the AWS account that runs the cloud browser, with your profile minus your email and phone. Its answers follow the same rules (cite your profile, or ask you), are saved, and help the on-device AI from then on.",
                               isOn: $model.settings.ai.cloudHelper)
                         .disabled(!model.settings.cloudBrowser)
                         .opacity(model.settings.cloudBrowser ? 1 : 0.5)
