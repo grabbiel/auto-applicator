@@ -224,6 +224,25 @@ public final class Answerer: @unchecked Sendable {
         return Self.misfiled(shown, profile)
     }
 
+    /// The box for the person's own phone number.
+    static let phoneLabel = Regex(#"^(your |mobile |cell |home |primary |contact )?(phone|telephone|mobile|cell)( phone)?( number| no\.?)?( \d)?$"#)
+
+    /// The person's phone number written another way than `shown` (what the box holds now), for a form that turned it
+    /// away: with dashes, spaces or brackets in it, the digits alone (Infosys's check); as digits alone, 512-555-0142.
+    /// Nil without a number in the profile, or with no other way to write it.
+    static func otherPhoneFormat(_ phone: String, shown: String) -> String? {
+        var digits = phone.filter(\.isNumber)
+        guard digits.count >= 7 else { return nil }
+        // A US or Canadian number without its country code (+1), as the form's own country list or format has it.
+        if digits.count == 11, digits.hasPrefix("1"), !phone.trimmed.hasPrefix("+") || phone.trimmed.hasPrefix("+1") { digits.removeFirst() }
+        let now = shown.trimmed
+        // An emptied box (the page redrew it) gets the number again as the profile has it.
+        guard !now.isEmpty else { return nil }
+        if now.contains(where: { !$0.isNumber }) { return digits }
+        guard digits.count == 10 else { return nil }
+        return "\(digits.prefix(3))-\(digits.dropFirst(3).prefix(3))-\(digits.suffix(4))"
+    }
+
     /// The same answer written another way: "(512) 555-0142" and "5125550142", "OR - Oregon" and "Oregon".
     static func sameAnswer(_ mine: String, _ current: String) -> Bool {
         // A link is the same only in the same form: sites turn away "linkedin.com/in/…" without https://.
@@ -262,8 +281,20 @@ public final class Answerer: @unchecked Sendable {
         return out
     }
 
+    /// "Number" just after a phone's country code is the phone number (EchoStar's iCIMS sign-in: "Country Code",
+    /// "Number"). Taken alone, it was answered as "how many" with the person's years of experience.
+    static func phoneNumbersAfterCountryCodes(_ fields: [FieldSpec]) -> [FieldSpec] {
+        let bare = Regex(#"^(number|no\.?|#|digits)$"#)
+        let code = Regex(ProfileRules.phoneCountryLabel + #"|country (phone )?code|phone (country )?code|dialing code"#)
+        var out = fields
+        for i in out.indices.dropFirst() where bare.matches(norm(out[i].plainLabel)) && code.matches(norm(out[i - 1].plainLabel)) {
+            out[i].label = "Phone number"
+        }
+        return out
+    }
+
     public func resolve(_ fields: [FieldSpec], job: JobContext, feedback: [String: String] = [:]) async -> Resolution {
-        let fields = Self.entrySections(fields)
+        let fields = Self.entrySections(Self.phoneNumbersAfterCountryCodes(fields))
         var res = Resolution()
         var todo: [FieldSpec] = []
         func park(_ f: FieldSpec) { if f.required { res.unresolved.append(f) } else { res.leftBlank.append(f) } }
@@ -276,6 +307,14 @@ public final class Answerer: @unchecked Sendable {
                 f.label = named
             }
             let fb = feedback[f.id]
+            // The person's phone number turned away as it's written (Infosys takes digits only, without a word: it outlines
+            // "512-555-0142" in red): written another way.
+            if fb != nil, f.type == .text, Self.phoneLabel.matches(norm(f.plainLabel)), !["References", "Emergency contact", "Referral"].contains(f.section),
+               let other = Self.otherPhoneFormat(profile.personal.phone, shown: f.currentValue) {
+                res.answers[f.id] = other
+                res.sources[f.id] = "profile"
+                continue
+            }
             // The person's own details beat what a site read off the resume: Workday's "linkedin.com/in/…" (which it then
             // turns away), Blue Yonder's "Peru" for Country (which made the US phone number invalid).
             if !f.currentValue.isEmpty, !["Work experience", "Education", "References", "Emergency contact", "Referral"].contains(f.section),

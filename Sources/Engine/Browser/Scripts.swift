@@ -731,6 +731,13 @@ enum Scripts {
       if (!msg && el.willValidate && el.validity && !el.validity.valid && shown(el) && !(el.validity.valueMissing && showsChoice()))
         msg = el.validationMessage || 'Invalid value.';
       if (!msg && el.getAttribute('aria-invalid') === 'true') msg = 'This field is invalid or required.';
+      // A box the form only outlines in red, without words (Infosys puts "has-error" on the box, or on the select2 box
+      // it draws for a list).
+      const MARK = /(^|\s)(has-error|is-invalid|input-error|field-error|error)(\s|$)/i;
+      const marked = x => !!x && typeof x.className === 'string' && MARK.test(x.className);
+      const drawn = el.tagName === 'SELECT' && el.nextElementSibling && /\bselect2\b/.test(el.nextElementSibling.className || '')
+        ? el.nextElementSibling.querySelector('.select2-selection') : null;
+      if (!msg && (marked(el) && shown(el) || marked(drawn) && shown(drawn))) msg = 'This field is invalid or required.';
       if (msg) out[id] = msg;
     }
     // A message over the form that names its field (Taleo's 'The value entered in the field "User Name" is invalid'):
@@ -929,14 +936,28 @@ enum Scripts {
     const screen = body.length < 50 && [...document.querySelectorAll('iframe')].some(f => /_Incapsula_Resource|captcha-delivery\.com|perfdrive/i.test(f.src || ''));
     if (puzzle || screen || /performing security verification|verif(y|ying) (that )?you are (a )?human|checking (if the site connection is secure|your browser)|just a moment\.\.\.|are you a robot|press (&|and) hold|ddos protection by/i.test(head)) kind = 'botcheck';
     else if (/no longer accepting applications|applications( for this (position|job|role|posting))? (are )?no longer (being )?accepted|(job|position|posting|requisition) (is )?no longer (available|open|active)|(position|job) has been (filled|closed)|this job (has )?expired|job not found|(job|position|posting) (may|might) (be )?no longer (be )?(available|exist)|(job|position|page) you('re| are) searching for is (not|no longer) available|(this )?(job|position|posting) is (not|no longer) available|(page|job|position) you('re| are) looking for (no longer exists|(might|may) have (been )?(moved|removed|expired|filled)|(can'?t|cannot|could not) be found|does(n'?t| not) exist|is no longer)/i.test(body)) kind = 'closed';
-    else if (fields.length === 0 && /we could not process your request|something went wrong|an (unexpected )?error (has )?occurred|please try again later|service (is )?(temporarily )?unavailable|page (you requested )?(could not be|was not|not) found|access denied/i.test(head)) kind = 'error';
-    else if (/check your (e-?mail|inbox)|verify your (e-?mail|account)|we('ve| have)? (just )?sent (you )?(an? )?(e-?mail|link|verification)|confirm your e-?mail|activation (link|e-?mail)|click (on )?the link (in|we)/i.test(body) && !fields.some(e => e.type !== 'password')) kind = 'emaillink';
+    // A security service that turned the browser away for good (Cloudflare's "Sorry, you have been blocked" on
+    // Recruitology, Akamai's "You don't have permission to access" on T-Mobile's and Rocket's sites).
+    const BLOCKED = /sorry, you have been blocked|you are unable to access [\w.-]+\.\w+|you don'?t have permission to access|access (to this (page|site) )?(has been )?denied|request (was )?blocked|the request could not be satisfied/i;
+    const ERROR_SAID = /we could not process your request|something went wrong|an (unexpected )?error (has )?occurred|please try again later|service (is )?(temporarily )?unavailable|page (you requested )?(could not be|was not|not) found/i;
+    if (kind === 'page' && fields.length === 0 && BLOCKED.test(head)) kind = 'blocked';
+    if (kind === 'page' && fields.length === 0 && ERROR_SAID.test(head)) kind = 'error';
+    else if (kind === 'page' && /check your (e-?mail|inbox)|verify your (e-?mail|account)|we('ve| have)? (just )?sent (you )?(an? )?(e-?mail|link|verification)|confirm your e-?mail|activation (link|e-?mail)|click (on )?the link (in|we)/i.test(body) && !fields.some(e => e.type !== 'password')) kind = 'emaillink';
     // Nothing but the message: no menus, links or pictures of the site's own.
     const bare = body.length < 200 && document.querySelectorAll('a[href], img, nav, header').length < 3;
     // A resume box that is only a drop zone (its file input hidden) is still a form.
     const upload = [...document.querySelectorAll('input[type=file]')].some(f => !f.disabled && !f.closest(NOT_FORM) &&
       [f, f.parentElement, f.parentElement && f.parentElement.parentElement].some(e => e && shown(e)));
-    return {kind, fields: fields.length, passwords: fields.filter(e => e.type === 'password').length, text: head.slice(0, 300), bare, puzzle, upload};
+    // What the error says, from the heading or line that says it (ServiceNow's “Page Not Found” comes after its whole menu).
+    let said = '';
+    if (kind === 'error' || kind === 'blocked') {
+      const RE = kind === 'error' ? ERROR_SAID : BLOCKED;
+      said = [...document.querySelectorAll('h1, h2, h3, h4, p, [role=alert], [class*="error" i], [class*="message" i]')]
+        .filter(shown).map(e => clean(e.innerText)).filter(t => t && t.length <= 200 && RE.test(t)).sort((a, b) => a.length - b.length)[0] || '';
+      if (!said) { const m = head.match(RE); said = m ? head.slice(Math.max(0, m.index - 30), m.index + 120) : ''; }
+    }
+    const gone = kind === 'error' && /page (you requested )?(could not be|was not|not) found|\b404\b/i.test(said);
+    return {kind, fields: fields.length, passwords: fields.filter(e => e.type === 'password').length, text: head.slice(0, 300), bare, puzzle, upload, said, gone};
     """#
 
     /// A popup over the form offering to fill it from the resume (Infosys's "Extracting information from the Resume…
@@ -966,6 +987,14 @@ enum Scripts {
       (/\b(apply|application|send (us )?your|resume|cv)\b/i.test(clean(a.innerText || a.getAttribute('aria-label') || ''))
        || /subject=[^&]*\b(application|apply|resume|cv)\b/i.test(decodeURIComponent(a.getAttribute('href') || ''))));
     return link ? decodeURIComponent(link.getAttribute('href').replace(/^mailto:/i, '').split('?')[0]).trim() || null : null;
+    """#
+
+    /// An "are you human?" check that may stay out of sight until the form is sent (an invisible hCaptcha or reCAPTCHA,
+    /// Turnstile): for saying why a form that won't move on is held up.
+    static let hiddenRobotCheck = prelude + #"""
+    if ([...document.querySelectorAll('iframe')].some(f => /hcaptcha\.com|google\.com\/recaptcha|recaptcha\.net|challenges\.cloudflare\.com/i.test(f.src || ''))) return true;
+    if (document.querySelector('.h-captcha, .g-recaptcha, .cf-turnstile, [data-hcaptcha-widget-id], textarea[name="h-captcha-response"], textarea[name="g-recaptcha-response"]')) return true;
+    return [...document.querySelectorAll('button, a, [role=button]')].some(b => /hcaptcha|recaptcha/i.test(clean(b.innerText || b.getAttribute('aria-label') || '')));
     """#
 
     static let robotBox = prelude + #"""
@@ -1103,7 +1132,7 @@ enum Scripts {
     ];
     // Words for screen readers and icons aren't part of a button's name: "Apply (opens in new window)", "Apply →".
     const bare = s => clean((s || '').replace(/[(\[]?\s*(this link )?opens? in (a )?new (window|tab)\s*[)\]]?/ig, ' ')
-      .replace(/\b(external link|new window)\b/ig, ' ').replace(/[→›»↗➔⟶]/g, ' '));
+      .replace(/\b(external link|new window)\b/ig, ' ').replace(/[→›»↗➔⟶]|\s>+\s*$/g, ' '));
     const name = b => bare(b.getAttribute('aria-label') || b.innerText || b.value || '');
     const visibleText = b => bare(b.innerText || b.value || '');
     // A link straight to a job on an application site (Workday, Greenhouse, iCIMS…), whatever its words say.
@@ -1142,7 +1171,32 @@ enum Scripts {
     static let tagAccountForm = prelude + formFieldCounter + #"""
     ['data-auto-account', 'data-auto-user', 'data-auto-account-btn'].forEach(a => document.querySelectorAll('[' + a + ']').forEach(e => e.removeAttribute(a)));
     const pws = formFields(document).filter(e => e.type === 'password');
-    if (!pws.length) return null;
+    if (!pws.length) {
+      // A sign-in that asks for the email or user name first and the password on the next page (IBMid's): one box for
+      // it and nothing else to answer, on a page that says it's a sign-in, with "Remember me" or "Continue with Google"
+      // beside it. (An application's first page asking only for an email has no such things.)
+      const all = formFields(document);
+      const typing = all.filter(e => e.tagName === 'INPUT' && !/^(checkbox|radio|file)$/i.test(e.type || ''));
+      if (typing.length !== 1 || typing.length !== all.length) return null;
+      const u = typing[0];
+      const named = clean([u.labels && u.labels[0] ? u.labels[0].innerText : '', u.getAttribute('aria-label'), u.placeholder, u.name, u.id, u.autocomplete].filter(Boolean).join(' '));
+      if (!(u.type === 'email' || /e-?mail|user ?(name|id)|login|log ?in|sign ?in|\bid\b|ibmid/i.test(named))) return null;
+      const said = clean(document.title + ' ' + [...document.querySelectorAll('h1, h2, h3, legend')].filter(shown).map(h => h.innerText).join(' '));
+      const remember = [...document.querySelectorAll('input[type=checkbox]')].some(c =>
+        /remember me|keep me (signed|logged) in|stay (signed|logged) in/i.test(clean((c.labels && c.labels[0] ? c.labels[0].innerText : '') + ' ' + (c.getAttribute('aria-label') || ''))));
+      const socials = [...document.querySelectorAll('button, a, [role=button]')].some(b => shown(b) && social(b));
+      if (!((/\b(sign|log) ?in\b|\blogin\b/i.test(said) && (remember || socials)) || (remember && socials))) return null;
+      let box = u.form || u.parentElement;
+      while (box && box !== document.body && !box.querySelector('button, input[type=submit], [role=button]')) box = box.parentElement;
+      box = box || document.body;
+      box.setAttribute('data-auto-account', '1');
+      u.setAttribute('data-auto-user', '1');
+      const name = b => clean(b.innerText || b.value || b.getAttribute('aria-label') || '');
+      const go = [...box.querySelectorAll('button, input[type=submit], [role=button]')].filter(b => shown(b) && !b.disabled && !social(b))
+        .find(b => /^(continue|next|log ?in|sign ?in|login|signin|submit)$/i.test(name(b)));
+      if (go) go.setAttribute('data-auto-account-btn', '1');
+      return {kind: 'login', passwords: 0, button: go ? name(go) : '', user: true, upload: false};
+    }
     const pw = pws[0];
     // The box around the password: its form, or the nearest ancestor that also holds a button.
     let box = pw.form;
@@ -1249,7 +1303,7 @@ enum Scripts {
     const root = rootSel ? document.querySelector(rootSel) : document.body;
     if (!root) return null;
     document.querySelectorAll('[data-auto-btn]').forEach(b => b.removeAttribute('data-auto-btn'));
-    const BAD = /^(back|previous|cancel|close|save( (for|as) (later|draft))?|clear|reset|remove|delete|add( another)?|upload|browse|choose file|attach|edit|sign out|log ?out|search|skip|print|download|forgot|show|hide|help)\b/i;
+    const BAD = /^(back|previous|cancel|close|save( (for|as) (later|draft))?|clear|reset|remove|delete|add( another)?|upload|browse|choose file|attach|edit|sign out|log ?out|search|skip|print|download|forgot|show|hide|help|join|become (a|an) |membership|donate|shop|buy|subscribe|explore|learn more|read more|contact|chat|new chat|send (a )?message|open chat)\b/i;
     const name = b => words(b) || clean(b.getAttribute('aria-label') || '');
     const ok = b => shown(b) && !b.disabled && b.getAttribute('aria-disabled') !== 'true' && name(b) && !BAD.test(name(b)) && !social(b) &&
       !b.closest('header, nav, footer, [id*=cookie i]:not(body):not(html), [class*=cookie i]:not(body):not(html), #onetrust-consent-sdk, [role=search]');
@@ -1261,6 +1315,9 @@ enum Scripts {
       .filter(b => b.type === 'submit' || /primary|submit|next|continue|cta/i.test(b.className + ' ' + (b.getAttribute('data-automation-id') || '')));
     if (!cands.length) return null;
     const pick = cands[cands.length - 1];
+    // A page without a single box isn't a form: only a button that moves an application on (TAG's job link went to a
+    // page about its membership, whose main button is "Join TAG!").
+    if (!fields.length && !/^(next|continue|proceed|submit|apply|start|begin|review|confirm|send|verify|get (a |the )?code)\b/i.test(name(pick))) return null;
     pick.setAttribute('data-auto-btn', '1');
     return name(pick);
     """#

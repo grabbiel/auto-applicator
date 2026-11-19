@@ -353,6 +353,15 @@ public final class Database: @unchecked Sendable {
         return out
     }
 
+    /// How many of the jobs found each company posted, under the name LinkedIn shows (for searching companies to skip).
+    public func companyCounts() -> [String: Int] {
+        var out: [String: Int] = [:]
+        for (name, n) in query("SELECT company, COUNT(*) FROM jobs WHERE company != '' GROUP BY company", []) { ($0.string(0), $0.int(1)) } {
+            out[name.trimmed, default: 0] += n
+        }
+        return out
+    }
+
     public func deleteJob(_ id: String) { run("DELETE FROM jobs WHERE job_id = ?", [.text(id)]) }
 
     // MARK: - learned answers (qa_cache)

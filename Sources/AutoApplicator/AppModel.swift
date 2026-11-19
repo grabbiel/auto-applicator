@@ -118,6 +118,8 @@ final class AppModel {
     var runs: [RunRecord] = []
     var activity: [DayActivity] = []
     var weekCounts: [JobStatus: Int] = [:]
+    /// How many of the jobs found each company posted (LinkedIn's names), for searching companies to skip.
+    var companyCounts: [String: Int] = [:]
 
     // resume reading
     var resumeStatus: String?
@@ -194,6 +196,8 @@ final class AppModel {
         // Set up before (or carried over from 0.3) but never shown the tour.
         if settings.setupComplete && !settings.tourComplete { tourStep = 0 }
         refreshData()
+        // The directory of companies (for the list to skip) takes a moment to read; read it before it's needed.
+        Task.detached(priority: .utility) { _ = CompanyDirectory.shared.companies.count }
         Log.info("App started (\(Bundle.main.bundleIdentifier ?? "no bundle"))")
     }
 
@@ -254,6 +258,7 @@ final class AppModel {
         runs = db.recentRuns(limit: 30)
         activity = db.dailyActivity(days: 14).map { DayActivity(day: $0.day, sent: $0.sent, prepared: $0.prepared) }
         weekCounts = db.statusCounts(since: Calendar.current.date(byAdding: .day, value: -7, to: Date()))
+        companyCounts = db.companyCounts()
         NSApp?.dockTile.badgeLabel = pending.isEmpty ? nil : "\(pending.count)"
     }
 

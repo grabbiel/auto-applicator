@@ -1087,6 +1087,82 @@ class HandlerTests: XCTestCase {
         XCTAssertNil(SiteRouter.identityProvider(URL(string: "https://jpmc.fa.oraclecloud.com/hcmUI")))
     }
 
+    /// IBM's sign-in (2026): one box for the account's ID, "Remember me", Continue, "Continue with Google/GitHub"; the
+    /// password comes on the next page. Only the email goes in that box; with an account the app made there, it signs in
+    /// and fills the application; without one, it stops saying so.
+    static let emailFirstSignIn = """
+        <title>Log in to Initech</title><main id="m"></main>
+        <script>
+        const m = document.getElementById('m');
+        const login = () => {
+          m.innerHTML = '<h1>Log in to Initech</h1><form id="f" onsubmit="return false"><label for="u">Initech ID</label><input id="u" name="username">' +
+            '<label><input type="checkbox" id="rem"> Remember me</label><button id="go" type="submit">Continue</button></form>' +
+            '<button id="google">Continue with Google</button><button id="github">Continue with GitHub</button>' +
+            (sessionStorage.getItem('unknown') ? '<p class="error">We could not find an account for that ID.</p>' : '');
+          document.getElementById('google').onclick = document.getElementById('github').onclick = () => sessionStorage.setItem('social', '1');
+          document.getElementById('go').onclick = () => {
+            const id = document.getElementById('u').value;
+            sessionStorage.setItem('typedID', id);
+            if (window.knownID && id === window.knownID) password(id); else { sessionStorage.setItem('unknown', '1'); login(); }
+          };
+        };
+        const password = id => {
+          m.innerHTML = '<h1>Log in to Initech</h1><p>' + id + '</p><form onsubmit="return false"><label for="p">Password</label>' +
+            '<input id="p" type="password"><button id="in" type="submit">Log in</button></form>';
+          document.getElementById('in').onclick = () => { sessionStorage.setItem('pw', document.getElementById('p').value); apply(); };
+        };
+        const apply = () => {
+          history.pushState({}, '', '/careers/apply/77');
+          m.innerHTML = '<h1>Apply: Software Engineer</h1><form onsubmit="return false"><label for="fn">First name</label><input id="fn" required>' +
+            '<label for="ln">Last name</label><input id="ln" required><label for="em">Email</label><input id="em" type="email" required>' +
+            '<button type="submit" id="send">Submit application</button></form>';
+        };
+        login();
+        </script>
+        """
+
+    func testAnEmailFirstSignInGetsOnlyTheEmail() async throws {
+        let base = URL(string: "https://login.initech.example/authsvc/signin")!
+        try await web.loadTestHTML(Self.emailFirstSignIn, base: base)
+        let form = await web.accountForm()
+        XCTAssertEqual(form?.kind, .login)
+        XCTAssertEqual(form?.passwords, 0)
+        XCTAssertEqual(form?.button, "Continue")
+
+        var secrets = Secrets()
+        secrets.portalPassword = "Portal-Pass-2026!"
+        // No account there: the email once, then a stop that says why.
+        var result = try await GenericHandler(web: web, ctx: context(FakeModel(), practice: true, secrets: secrets)).apply()
+        XCTAssertEqual(result.status, .failedForm)
+        XCTAssertTrue(result.notes.contains("didn't go on after your email"), result.notes)
+        let typedID = try await page("sessionStorage.getItem('typedID')") as? String
+        XCTAssertEqual(typedID, Fixture.profile.personal.email)
+        let social = try await page("sessionStorage.getItem('social')") as? String
+        XCTAssertNil(social, "never another company's sign-in")
+
+        // An account the app made there: the email, then the portal password, then the application.
+        home.db.noteAccount(host: "login.initech.example", email: Fixture.profile.personal.email)
+        try await web.loadTestHTML(Self.emailFirstSignIn.replacingOccurrences(of: "<script>", with: "<script>window.knownID = '\(Fixture.profile.personal.email)';"),
+                                   base: base)
+        _ = try await page("sessionStorage.clear(), true")
+        steps = []
+        result = try await GenericHandler(web: web, ctx: context(FakeModel(), practice: true, secrets: secrets)).apply()
+        XCTAssertEqual(result.status, .practiceComplete, "\(result.notes) | \(steps.joined(separator: " | "))")
+        let pw = try await page("sessionStorage.getItem('pw')") as? String
+        XCTAssertEqual(pw, secrets.portalPassword)
+        let first = try await page("document.getElementById('fn').value") as? String
+        XCTAssertEqual(first, Fixture.profile.personal.firstName)
+
+        // An application's first page that asks only for an email is no sign-in.
+        try await web.loadTestHTML("""
+            <title>Apply</title><h1>Apply for Software Engineer</h1><form><label for="e">Email Address</label><input id="e" type="email">
+            <label><input type="checkbox" id="t"> I agree with the terms and conditions</label><button>Next</button></form>
+            <button>Apply with LinkedIn</button>
+            """, base: URL(string: "https://careers.initech.example/apply")!)
+        let notSignIn = await web.accountForm()
+        XCTAssertNil(notSignIn)
+    }
+
     nonisolated static func rfc2822(_ date: Date) -> String {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
@@ -1733,6 +1809,31 @@ extension HandlerTests {
     }
 
     /// Mastercard's apply page before its form loads: "Get notified for similar jobs" (an email box and Submit) and
+    /// A posting that links to a page about the company's membership (TAG's): its "Join Now!" and the slideshow's
+    /// "Next slide" are no steps of an application; it stops saying there's no form.
+    func testAPageWithoutAnApplicationIsSaidToBeOne() async throws {
+        try await web.loadTestHTML("""
+            <title>Why join TAG</title><h1>Why Join TAG?</h1><p>Members get events, programs and a community of tech leaders.</p>
+            <a href="#join" onclick="window.__joined = true; return false">Join Now!</a>
+            <a href="#more" onclick="window.__joined = true; return false">Become a TAG Member Now</a>
+            <div class="carousel"><button onclick="window.__slid = (window.__slid || 0) + 1">Previous slide</button>
+            <button onclick="window.__slid = (window.__slid || 0) + 1">Next slide</button><button>Next news</button></div>
+            """, base: URL(string: "https://www.tag.example/membership/why-join-tag/")!)
+        let result = try await GenericHandler(web: web, ctx: context(FakeModel(), practice: true)).apply()
+        XCTAssertEqual(result.status, .failedForm)
+        XCTAssertTrue(result.notes.contains("No application form"), result.notes)
+        let joined = try await page("window.__joined === true") as? Bool
+        XCTAssertEqual(joined, false)
+        let slid = try await page("window.__slid || 0") as? Int
+        XCTAssertEqual(slid, 0)
+        XCTAssertFalse(Regex(nextPattern).matches("next slide"))
+        XCTAssertTrue(Regex(nextPattern).matches("next"))
+        XCTAssertTrue(Regex(nextPattern).matches("next step"))
+        XCTAssertTrue(Regex(nextPattern).matches("join now"))
+        XCTAssertFalse(Regex(nextPatternWithoutBoxes).matches("join now"))
+        XCTAssertTrue(Regex(nextPatternWithoutBoxes).matches("create account"))
+    }
+
     /// "Save job" boxes under "Similar Jobs" are sign-ups, not the application. An application's own email box beside
     /// a talent-community box is still read.
     func testAJobAlertSignUpIsNotTheApplication() async throws {

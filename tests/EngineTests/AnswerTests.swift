@@ -1288,4 +1288,40 @@ extension AnswerTests {
         XCTAssertEqual(res.answers[fields[2].id], "https://www.linkedin.com/in/janedoe")
         XCTAssertNil(db.cacheGet(questionHash("Facebook", "text")), "the made-up answer is forgotten")
     }
+
+    /// A phone number the form turned away as it was written (Infosys takes digits only and says so only by outlining
+    /// the box in red): written another way, not the same again.
+    func testAPhoneNumberTurnedAwayIsWrittenAnotherWay() async throws {
+        XCTAssertEqual(Answerer.otherPhoneFormat("512-555-0142", shown: "512-555-0142"), "5125550142")
+        XCTAssertEqual(Answerer.otherPhoneFormat("+1 (512) 555-0142", shown: "+1 (512) 555-0142"), "5125550142")
+        XCTAssertEqual(Answerer.otherPhoneFormat("5125550142", shown: "5125550142"), "512-555-0142")
+        XCTAssertEqual(Answerer.otherPhoneFormat("+44 20 7946 0958", shown: "+44 20 7946 0958"), "442079460958")
+        XCTAssertNil(Answerer.otherPhoneFormat("+44 20 7946 0958", shown: "442079460958"))
+        XCTAssertNil(Answerer.otherPhoneFormat("", shown: ""))
+        XCTAssertNil(Answerer.otherPhoneFormat("512-555-0142", shown: ""), "an emptied box gets it as the profile has it")
+
+        let home = try TestHome()
+        var profile = Fixture.profile
+        profile.personal.phone = "512-555-0142"
+        let answerer = Answerer(profile: profile, db: home.db, ai: nil)
+        var phone = field("Phone number", id: "p")
+        phone.currentValue = "512-555-0142"
+        let again = await answerer.resolve([phone], job: Fixture.job, feedback: ["p": "This field is invalid or required."])
+        XCTAssertEqual(again.answers["p"], "5125550142")
+        let first = await answerer.resolve([field("Phone number", id: "p")], job: Fixture.job)
+        XCTAssertEqual(first.answers["p"], "512-555-0142", "as the profile has it, until the form turns it away")
+    }
+
+    /// EchoStar's iCIMS: "Country Code" then a box called only "Number", which got "6" (years of experience).
+    func testANumberAfterACountryCodeIsThePhoneNumber() async throws {
+        let home = try TestHome()
+        var profile = Fixture.profile
+        profile.personal.phone = "512-555-0142"
+        let answerer = Answerer(profile: profile, db: home.db, ai: nil)
+        let res = await answerer.resolve([field("Country Code", .select, ["— Make a Selection —", "(+1) United States", "(+44) United Kingdom"], id: "cc"),
+                                          field("Number", id: "n")], job: Fixture.job)
+        XCTAssertEqual(res.answers["cc"], "(+1) United States")
+        XCTAssertEqual(res.answers["n"], "512-555-0142")
+        XCTAssertEqual(Answerer.phoneNumbersAfterCountryCodes([field("Number", id: "n")]).first?.label, "Number", "alone, it could be anything")
+    }
 }
