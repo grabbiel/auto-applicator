@@ -219,7 +219,11 @@ final class SiteSurveyTests: XCTestCase {
                 .filter(t => t).slice(0, 30);
             """#)) as? [String]) ?? []
         return [
-            "fields": fields.prefix(60).map { "\($0.kind)\($0.spec.required ? "*" : "") \($0.spec.label.prefix(90)) = \($0.spec.currentValue.prefix(50))" },
+            // A list left empty shows its choices: the answer may be there under another name.
+            "fields": fields.prefix(60).map { f in
+                let choices = f.spec.currentValue.isEmpty && !f.spec.options.isEmpty ? " {\(f.spec.options.prefix(25).joined(separator: " | "))}" : ""
+                return "\(f.kind)\(f.spec.required ? "*" : "") \(f.spec.label.prefix(90)) = \(f.spec.currentValue.prefix(50))\(choices)"
+            },
             "errors": Array((await web.collectErrors()).values.prefix(10)),
             "buttons": buttons,
             "text": String(await web.text(maxChars: 900).prefix(900)),

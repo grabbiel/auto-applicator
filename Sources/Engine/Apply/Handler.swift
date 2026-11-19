@@ -70,11 +70,16 @@ let submitPattern = #"^(submit( (my )?application)?|send application|apply|apply
     + #"enviar( mi| la)?( solicitud| candidatura| postulaci[oó]n)?|sollicitatie (versturen|verzenden)|versturen|verzenden|invia( la)?( candidatura)?)$"#
 /// Buttons that move a form on without sending the application: Next, a sign-up's "Create account", "Verify" after
 /// an emailed code, "I acknowledge" under a privacy notice, "Skip & continue" past an optional step (Amazon's SMS
-/// updates). Buttons that sign in with another company's account ("Continue with GitHub") are never pressed.
-let nextPattern = #"^(next|continue|save (and|&) continue|skip (and|&) continue|next step|continue to next step|review|review application|proceed|"#
+/// updates). Buttons that sign in with another company's account ("Continue with GitHub") are never pressed, and a
+/// slideshow's "Next slide" or "Next news" (TAG's membership page) is no step of a form.
+let nextPattern = #"^(next(?!\s+(slides?|news|images?|photos?|pictures?|stor(y|ies)|posts?|articles?|testimonials?|videos?|items?|cards?|quotes?|reviews?|events?|jobs?|month)\b)|continue|save (and|&) continue|skip (and|&) continue|next step|continue to next step|review|review application|proceed|"#
     + #"verify|verify (email|code|and continue)|confirm|submit code|i acknowledge|acknowledge|i agree|agree (and|&) continue|accept (and|&) continue|consent (and|&) continue|"#
-    + #"create( an| my)? (account|profile)|register|sign ?up|join(?! (our|the|us)\b)|get started|start( my)? application|save and next|"#
+    // "Join" alone or "Join now" makes an account; "Join TAG!" on a page about a group's membership is no step of an application.
+    + #"create( an| my)? (account|profile)|register|sign ?up|join( now| today)?(?=\W*$)|get started|start( my)? application|save and next|"#
     + #"weiter|nächster schritt|suivant|continuer|étape suivante|siguiente|continuar|volgende|verder|avanti|continua|próximo|seguinte)\b"#
+/// The same, on a page with no boxes at all: there "Join now" joins something else (TAG's membership), as no sign-up for
+/// an application has nothing to fill.
+let nextPatternWithoutBoxes = nextPattern.replacingOccurrences(of: #"join( now| today)?(?=\W*$)|"#, with: "")
 /// The button that has a site send a verification code, once it's been told where (ADP's "Send").
 let sendCodePattern = #"^(send|send( me)?( a| the| my)?( verification| security| one[- ]time| login)? code|get( a| the)?( verification)? code|"#
     + #"e-?mail( me)?( a| the)?( verification)? code|request( a| the)?( verification)? code)$"#
@@ -121,6 +126,8 @@ public class ApplicationHandler {
     var applicationURL: URL?
     private var accountSteps = 0
     private var signInTried = false
+    /// The email went into a sign-in that asks for it before the password.
+    private var emailFirstTried = false
     /// The sign-up page's "Sign in" pressed once for an account the app knows of; back on the sign-up, there's none.
     private var signInLinkTried = false
     private var firstTimeUploadTried = false
@@ -559,6 +566,9 @@ public class ApplicationHandler {
             if !(await web.waitOutBotCheck()) { return await failure(await web.botCheckNote(siteName)) }
             try? await web.waitForLoad(timeout: 15)
             await web.dismissBanners()
+        case .blocked:
+            return await failure("\(siteName) turned the app's browser away (“\((page.said.isEmpty ? page.text : page.said).prefix(100))”). "
+                                 + "Sites do this to keep automated browsers out. Apply on their site yourself.")
         case .emaillink:
             return try await confirmEmailLink()
         default:
@@ -605,7 +615,7 @@ public class ApplicationHandler {
         }
         // A sign-in box.
         if ctx.db.hasAccount(host: host) && !signInTried {
-            return (try await signIn(email: email, password: password, form: form), false)
+            return (try await signIn(email: email, password: password, form: form), form.passwords == 0)
         }
         // The account the app made (or reset) here no longer opens with the portal password.
         if ctx.db.hasAccount(host: host) && !resetTried {
@@ -657,7 +667,7 @@ public class ApplicationHandler {
             return (nil, true)
         }
         if !signInTried {
-            return (try await signIn(email: email, password: password, form: form), false)
+            return (try await signIn(email: email, password: password, form: form), form.passwords == 0)
         }
         // Signing in didn't work and there's no way in for new applicants: an account for the email with another
         // password (made by hand, or before the portal password).
@@ -748,6 +758,21 @@ public class ApplicationHandler {
     }
 
     private func signIn(email: String, password: String, form: WebAgent.AccountForm) async throws -> ApplyResult? {
+        // A sign-in that asks for the email first and the password on its next page.
+        if form.passwords == 0 {
+            if emailFirstTried {
+                return await failure("\(siteName) asks you to sign in with an account of theirs, and didn't go on after your email: "
+                                     + "most likely it has no account for it. Make one on their site with your email and portal password, or apply there yourself.")
+            }
+            emailFirstTried = true
+            ctx.step("Entering your email on \(siteName)'s sign-in")
+            await web.fill(#"[data-auto-user="1"]"#, email)
+            if await web.exists(#"[data-auto-account-btn="1"]"#) { await web.click(#"[data-auto-account-btn="1"]"#) } else { await web.press(.enter) }
+            lastActionAt = Date()
+            try await web.sleep(4)
+            try? await web.waitForLoad(timeout: 15)
+            return nil
+        }
         signInTried = true
         ctx.step("Signing in to \(siteName)")
         if form.hasUser { await web.fill(#"[data-auto-user="1"]"#, email) }
@@ -817,6 +842,14 @@ public class ApplicationHandler {
             msgs = errors.values.prefix(4).joined(separator: "; ")
         }
         return (false, await failure("The form didn't accept the answers: \(msgs)"))
+    }
+
+    /// A form that won't move on with an "are you human?" check on its page (EchoStar's invisible hCaptcha): most likely
+    /// the check is what holds it, and that's the person's to pass.
+    private func heldByRobotCheck() async -> ApplyResult? {
+        guard await web.hasHiddenRobotCheck() else { return nil }
+        return await failure("\(siteName)'s form didn't move on, and it has an “are you human?” check that most likely held the app back. "
+                             + "The app never answers those; apply on their site yourself.")
     }
 
     func confirmSubmitted(timeout: TimeInterval = 15) async -> Bool {
@@ -901,8 +934,10 @@ public class ApplicationHandler {
                     if ctx.practice { return await practiceResult() }
                     return try await submit(root: root) { await self.web.exists(#"[data-auto-btn="1"]"#) }
                 case .stop(let why)?:
+                    if let held = await heldByRobotCheck() { return held }
                     return await failure("The form didn't move on (the cloud AI: \(why))")
                 case nil:
+                    if let held = await heldByRobotCheck() { return held }
                     return await failure("The form didn't move on (same page four times).")
                 }
             }
@@ -1104,7 +1139,7 @@ final class GenericHandler: ApplicationHandler {
         }
         // A step of the application without questions (Amazon's "Get SMS updates", with "Skip & continue") is still
         // the application, and so is a page with only a resume drop zone.
-        if now.fields == 0 && now.passwords == 0 && !now.upload && now.kind == .page, await web.findButton(nextPattern, root: nil) == nil {
+        if now.fields == 0 && now.passwords == 0 && !now.upload && now.kind == .page, await web.findButton(nextPatternWithoutBoxes, root: nil) == nil {
             // Only a way in through another account (Fonzi's "Connect LinkedIn"): the app never connects one.
             if let other = await web.findButton(#"^(connect|link|sign in with|log ?in with|continue with)\s+(your\s+)?(linkedin|google|github|apple|microsoft|facebook|indeed)( account| profile)?$"#) {
                 return await failure("\(siteName) only lets you in with “\(other)”. The app never connects your accounts to a site; apply there yourself.")

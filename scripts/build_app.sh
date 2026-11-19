@@ -30,6 +30,8 @@ strip -x "$APP/Contents/MacOS/AutoApplicator"
 ICON="$ROOT/Resources/AppIcon.icns"
 [ -f "$ICON" ] || swift "$ROOT/scripts/make_icon.swift" "$ROOT/Resources"
 cp "$ICON" "$APP/Contents/Resources/AppIcon.icns"
+# Large employers and their other names, for the list of companies to skip (made by scripts/make_companies.py).
+cp "$ROOT/Resources/Companies.tsv" "$APP/Contents/Resources/Companies.tsv"
 # The optional cloud browser's address (written by scripts/deploy_cloud.sh). AA_CLOUD_CONFIG can name another file,
 # or "none" to leave it out (a copy for other people).
 CLOUD_CONFIG="${AA_CLOUD_CONFIG:-$ROOT/Resources/CloudConfig.json}"

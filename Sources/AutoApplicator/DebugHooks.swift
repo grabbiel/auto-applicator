@@ -71,7 +71,22 @@ enum DebugHooks {
             try? await Task.sleep(for: .milliseconds(300))
             typeInSearch("customer")
         }))
+        // The companies to skip: searching the directory, as typed ("Tata") and misspelled ("Tata Consulting").
+        for (name, query) in [("search-companies-tata", "Tata"), ("search-companies-consulting", "Tata Consulting")] {
+            list.append((name, {
+                typeInSearch(nil)
+                model.settings.setupComplete = true
+                model.tourStep = nil
+                model.settings.filters.blacklistCompanies = ["EY", "BeaconFire"]
+                model.page = .search
+                try? await Task.sleep(for: .milliseconds(400))
+                scrollMain(to: 1)
+                try? await Task.sleep(for: .milliseconds(300))
+                typeInSearch(query, field: "Add a company")
+            }))
+        }
         list.append(("live-running", {
+            typeInSearch(nil, field: "Add a company")
             typeInSearch(nil)
             model.page = .home
             await demoRun(model, env: env)
@@ -154,11 +169,12 @@ enum DebugHooks {
         return list
     }
 
-    /// Types into the search box the way a person would (nil clears it and leaves the box).
-    private static func typeInSearch(_ text: String?) {
+    /// Types into a text box (the search box unless `field` names another's placeholder) the way a person would (nil
+    /// clears it and leaves the box).
+    private static func typeInSearch(_ text: String?, field placeholder: String = "Search jobs") {
         guard let window = mainWindow, let root = window.contentView else { return }
         func fields(_ v: NSView) -> [NSTextField] { ((v as? NSTextField).map { [$0] } ?? []) + v.subviews.flatMap(fields) }
-        guard let field = fields(root).first(where: { $0.placeholderString?.hasPrefix("Search jobs") == true }) else { return }
+        guard let field = fields(root).first(where: { $0.placeholderString?.hasPrefix(placeholder) == true }) else { return }
         window.makeFirstResponder(field)
         guard let editor = field.currentEditor() as? NSTextView else { return }
         editor.selectAll(nil)

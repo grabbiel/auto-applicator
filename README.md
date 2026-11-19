@@ -53,6 +53,11 @@ and drag the app over the old one. Your data is kept either way.
 
 The search box at the top (⌘F) finds any job, company, waiting question, remembered answer or setting.
 
+**Companies to skip** (*Job search*) searches about 57,000 large employers as you type, on your Mac. Pick one from
+the list and its jobs are skipped under its other names too: *Tata Consultancy Services* also skips jobs posted as
+*TCS*. A name as you typed it skips every company whose name starts with it (*Tata* skips Tata Steel and Tata
+Consultancy Services, not Jaguar Land Rover, which Tata owns; the list offers those).
+
 **It learns as you go.** Every answer you give is remembered. A question worded like one you already answered reuses
 that answer, and the most relevant facts are given to the AI as evidence it must quote. It never guesses: when a
 required question can't be answered from what you told it, the job is skipped and the question waits on the
@@ -198,7 +203,8 @@ Sources/Engine/          everything that isn't UI
 Sources/AutoApplicator/  the SwiftUI app
 tests/EngineTests/       unit and browser tests against local HTML fixtures (no network)
 infra/                   CloudFormation for the cloud browser
-scripts/                 build, package, icon, disk-image background, cloud deploy
+scripts/                 build, package, icon, disk-image background, cloud deploy, company directory
+Resources/Companies.tsv  large employers and their other names, from Wikidata (CC0; scripts/make_companies.py)
 ```
 
 Build and test:

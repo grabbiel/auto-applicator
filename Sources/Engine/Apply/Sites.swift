@@ -1227,12 +1227,19 @@ enum SiteRouter {
                 try? await web.reload()
                 try await web.sleep(2)
                 continue
+            case .blocked:
+                return .stop("The company's site turned the app's browser away (“\((page.said.isEmpty ? page.text : page.said).prefix(100))”). "
+                             + "Sites do this to keep automated browsers out. Apply on their site yourself.")
+            case .error where page.gone:
+                // The job's page itself is gone (ServiceNow's “Page Not Found” for a posting it took down).
+                return .stop("The job's page is gone from the company's site (“\((page.said.isEmpty ? "Page not found" : page.said).prefix(100))”): "
+                             + "the posting was most likely taken down.")
             case .error where page.bare:
                 // Nothing of the site's own around the message (Deloitte's “We could not process your request”).
                 return .stop("The company's site wouldn't open in the app's browser; it showed only “\(page.text.prefix(100))”. "
                              + "Sites do this to turn away automated browsers. Apply on their site yourself.")
             case .error:
-                return .stop("The company's site showed an error: “\(page.text.prefix(120))”")
+                return .stop("The company's site showed an error: “\((page.said.isEmpty ? page.text : page.said).prefix(120))”")
             case .emaillink:
                 return .ready(.generic)
             default:

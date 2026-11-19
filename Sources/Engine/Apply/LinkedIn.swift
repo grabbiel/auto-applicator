@@ -73,8 +73,10 @@ public enum LinkedIn {
 
     /// Why a job is skipped by the user's filters (nil: keep it).
     public static func filterReason(_ card: JobCard, _ filters: Filters) -> JobStatus? {
-        let company = card.company.trimmed.lowercased()
-        if !company.isEmpty && filters.blacklistCompanies.contains(where: { $0.trimmed.lowercased() == company }) { return .skippedBlacklist }
+        // The company under any of its names, or one whose name starts with what's on the list ("Tata" skips "Tata
+        // Consultancy Services", "BeaconFire" skips "BeaconFire Inc.").
+        if !card.company.trimmed.isEmpty, !filters.blacklistCompanies.isEmpty,
+           CompanyDirectory.shared.listed(card.company, in: filters.blacklistCompanies) != nil { return .skippedBlacklist }
         let title = card.title.lowercased()
         if filters.titleExclude.contains(where: { !$0.trimmed.isEmpty && title.contains($0.trimmed.lowercased()) }) { return .skippedTitleFilter }
         let must = filters.titleMustContain.map { $0.trimmed.lowercased() }.filter { !$0.isEmpty }

@@ -587,7 +587,7 @@ extension WebAgent {
     }
 
     public struct PageKind: Sendable {
-        public enum Kind: String, Sendable { case page, botcheck, closed, error, emaillink }
+        public enum Kind: String, Sendable { case page, botcheck, blocked, closed, error, emaillink }
         public var kind: Kind
         public var fields: Int
         public var passwords: Int
@@ -598,6 +598,10 @@ extension WebAgent {
         public var puzzle = false
         /// A box for a resume, even one whose file input is hidden behind a drop zone.
         public var upload = false
+        /// What an error page says, from the line that says it.
+        public var said = ""
+        /// An error page saying the page doesn't exist ("Page Not Found", 404).
+        public var gone = false
     }
 
     public func pageKind() async -> PageKind {
@@ -607,7 +611,8 @@ extension WebAgent {
         let r = (try? await js(Scripts.pageKind)) as? [String: Any] ?? [:]
         return PageKind(kind: PageKind.Kind(rawValue: r["kind"] as? String ?? "") ?? .page, fields: (r["fields"] as? NSNumber)?.intValue ?? 0,
                         passwords: (r["passwords"] as? NSNumber)?.intValue ?? 0, text: r["text"] as? String ?? "",
-                        bare: (r["bare"] as? Bool) ?? false, puzzle: (r["puzzle"] as? Bool) ?? false, upload: (r["upload"] as? Bool) ?? false)
+                        bare: (r["bare"] as? Bool) ?? false, puzzle: (r["puzzle"] as? Bool) ?? false, upload: (r["upload"] as? Bool) ?? false,
+                        said: r["said"] as? String ?? "", gone: (r["gone"] as? Bool) ?? false)
     }
 
     /// The address a page's "Apply via email" link writes to, when it has one.
@@ -618,6 +623,11 @@ extension WebAgent {
     /// An "I'm not a robot" box on the page. The app never ticks one: only the user may.
     public func hasRobotBox() async -> Bool {
         (try? await js(Scripts.robotBox)) as? Bool ?? false
+    }
+
+    /// An "are you human?" check on the page, shown or not (see `Scripts.hiddenRobotCheck`).
+    public func hasHiddenRobotCheck() async -> Bool {
+        (try? await js(Scripts.hiddenRobotCheck)) as? Bool ?? false
     }
 
     /// Waits for a bot check that runs by itself ("Performing security verification…") to finish. False if it's still

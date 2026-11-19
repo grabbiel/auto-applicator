@@ -85,8 +85,10 @@ struct FiltersCard: View {
         Card {
             VStack(alignment: .leading, spacing: 18) {
                 SectionTitle(title: "Leave these alone", detail: "Jobs that match are skipped without opening them.")
-                Field(label: "Companies to skip", hint: "For example your current employer.", optional: true) {
-                    TagEditor(tags: f.blacklistCompanies, placeholder: "Company name")
+                Field(label: "Companies to skip",
+                      hint: "For example your current employer. A company picked from the list is also skipped under its other names (TCS for Tata Consultancy Services).",
+                      optional: true) {
+                    CompanyListEditor(companies: f.blacklistCompanies, seen: model.companyCounts)
                 }
                 Field(label: "Skip titles containing", hint: "For example Senior, Intern, Manager.", optional: true) {
                     TagEditor(tags: f.titleExclude, placeholder: "A word")
