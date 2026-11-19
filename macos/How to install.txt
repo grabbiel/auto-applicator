@@ -22,6 +22,10 @@ You need a Mac with Apple silicon (M1 or newer) and macOS 14 Sonoma or newer.
 
 After that, open Auto Applicator whenever you want to apply, or let it run by itself each day (Settings).
 
+UPDATES
+The app keeps itself up to date: when there's a new version, an "Update" button appears at the top, and the new
+version installs the next time you quit the app (or right away with "Restart now"). You can turn this off in Settings.
+
 YOUR DATA AND THE AI
 Your details stay on your Mac. On macOS 26 with Apple Intelligence turned on, the AI runs on your Mac with nothing
 to download. Otherwise the app can download a free AI model (about 5 GB) the first time you ask it to.

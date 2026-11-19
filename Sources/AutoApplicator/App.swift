@@ -50,6 +50,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             await model.refreshLinkedIn()
             await model.ensureAI()
         }
+        // A copy with a test data folder (AA_HOME) only looks for updates when told where (AA_UPDATE_FEED).
+        let env = ProcessInfo.processInfo.environment
+        if env["AA_HOME"] == nil || env["AA_UPDATE_FEED"] != nil {
+            model.updates.start { [weak model] in model?.settings.autoUpdate ?? false }
+        }
         DebugHooks.runIfRequested(model)
     }
 
@@ -99,6 +104,16 @@ struct AppCommands: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {}
+        CommandGroup(after: .appInfo) {
+            Button("Check for Updates…") {
+                model.page = .settings
+                Task { @MainActor in
+                    let message = await model.updates.check()
+                    if model.updates.offer != nil { model.updates.showDetails = true } else { model.show(message, symbol: "arrow.down.circle.fill") }
+                }
+            }
+            .disabled(Updates.installed == nil || model.updates.busy)
+        }
         CommandGroup(replacing: .appTermination) {
             Button("Quit Auto Applicator") { model.quit() }.keyboardShortcut("q")
         }

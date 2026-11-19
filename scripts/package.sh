@@ -102,4 +102,6 @@ codesign --verify --deep --strict "$MNT/$NAME.app"
 [ -L "$MNT/Applications" ] && [ -f "$MNT/How to install.txt" ] && [ -f "$MNT/.background/background.tiff" ]
 hdiutil detach -quiet "$MNT"
 
+# The app's Info.plist beside it, for scripts/make_update_manifest.swift.
+cp "$STAGE/$NAME.app/Contents/Info.plist" "$ROOT/dist/Info.plist"
 echo "Created $OUT (version $VERSION, $(du -h "$OUT" | cut -f1))"

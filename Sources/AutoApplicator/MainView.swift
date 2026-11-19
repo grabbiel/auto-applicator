@@ -95,6 +95,7 @@ private struct TopBar: View {
             SearchBox().frame(maxWidth: 620).padding(.horizontal, 190)
             HStack(spacing: 10) {
                 Spacer()
+                UpdateChip()
                 statusChip
                 bell
             }

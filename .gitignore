@@ -23,6 +23,10 @@ Resources/CloudConfig.json
 *.key
 *.pem
 *.p12
+*.p8
+*.cer
+*.certSigningRequest
+*.provisionprofile
 
 # Local agent prompt (describes features this project deliberately doesn't include)
 AGENTS.md

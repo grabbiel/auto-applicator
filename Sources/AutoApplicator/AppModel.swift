@@ -76,6 +76,7 @@ final class AppModel {
     @ObservationIgnored let store: Store
     @ObservationIgnored let db: Database
     @ObservationIgnored let ollama: OllamaManager
+    let updates: Updates
 
     var profile: Profile { didSet { if profile != oldValue { scheduleSave() } } }
     var settings: Engine.Settings { didSet { if settings != oldValue { scheduleSave() } } }
@@ -168,6 +169,7 @@ final class AppModel {
         db = Self.openDatabase(paths)
         db.closeUnfinishedRuns(note: "Stopped: the app closed during the run.")
         ollama = OllamaManager(paths: paths)
+        updates = Updates(paths: paths)
         profile = store.loadProfile() ?? Profile()
         settings = store.loadSettings()
         secrets = store.loadSecrets()
@@ -681,6 +683,7 @@ final class AppModel {
         webAgent?.close()
         ollama.stop()
         Supervisor.terminateAll(timeout: 2)
+        updates.installOnQuit()
         Log.info("App quit")
     }
 }

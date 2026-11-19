@@ -50,12 +50,25 @@ public struct CloudConfig: Codable, Sendable, Equatable {
     public static let callback = "autoapplicator://auth"
 
     /// `cloud.json` in the data folder (if someone put one there), else the copy inside the app.
+    /// A copy with a built-in config also writes the merged result to the data folder, so an update to a public build
+    /// (which has none) keeps the cloud browser and the cloud AI.
     public static func load(paths: AppPaths, bundle: Bundle = .main) -> CloudConfig? {
         let read = { (url: URL?) -> CloudConfig? in
             url.flatMap { try? Data(contentsOf: $0) }.flatMap { try? JSONDecoder().decode(CloudConfig.self, from: $0) }
         }
-        return merged(read(paths.home.appendingPathComponent("cloud.json")),
-                      builtIn: read(bundle.url(forResource: "CloudConfig", withExtension: "json")))
+        let file = paths.home.appendingPathComponent("cloud.json")
+        let local = read(file)
+        let builtIn = read(bundle.url(forResource: "CloudConfig", withExtension: "json"))
+        let config = merged(local, builtIn: builtIn)
+        if builtIn != nil, let config, config != local {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            if let data = try? encoder.encode(config) {
+                try? data.write(to: file, options: .atomic)
+                try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+            }
+        }
+        return config
     }
 
     /// The data folder's file wins, but what it leaves out (a file written before the cloud AI existed has no
