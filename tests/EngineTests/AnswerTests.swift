@@ -1298,6 +1298,7 @@ extension AnswerTests {
         XCTAssertEqual(Answerer.otherPhoneFormat("+44 20 7946 0958", shown: "+44 20 7946 0958"), "442079460958")
         XCTAssertNil(Answerer.otherPhoneFormat("+44 20 7946 0958", shown: "442079460958"))
         XCTAssertNil(Answerer.otherPhoneFormat("", shown: ""))
+        XCTAssertNil(Answerer.otherPhoneFormat("512-555-0142", shown: ""), "an emptied box gets it as the profile has it")
 
         let home = try TestHome()
         var profile = Fixture.profile

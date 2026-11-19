@@ -236,7 +236,9 @@ public final class Answerer: @unchecked Sendable {
         // A US or Canadian number without its country code (+1), as the form's own country list or format has it.
         if digits.count == 11, digits.hasPrefix("1"), !phone.trimmed.hasPrefix("+") || phone.trimmed.hasPrefix("+1") { digits.removeFirst() }
         let now = shown.trimmed
-        if now.isEmpty || now.contains(where: { !$0.isNumber }) { return now == digits ? nil : digits }
+        // An emptied box (the page redrew it) gets the number again as the profile has it.
+        guard !now.isEmpty else { return nil }
+        if now.contains(where: { !$0.isNumber }) { return digits }
         guard digits.count == 10 else { return nil }
         return "\(digits.prefix(3))-\(digits.dropFirst(3).prefix(3))-\(digits.suffix(4))"
     }
