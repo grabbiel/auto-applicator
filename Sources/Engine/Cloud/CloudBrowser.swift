@@ -124,6 +124,11 @@ public final class CloudBrowser {
         pageSession = try await call("Target.attachToTarget", ["targetId": target, "flatten": true], onPage: false)["sessionId"] as? String
         guard pageSession != nil else { throw BrowserError("Couldn't attach to the cloud browser's page.") }
         _ = try await call("Page.enable")
+        // Chrome sends focus and blur events only while its page has the focus, and this one has it only once something
+        // was clicked: a box filled first thing lost the focus without the page hearing of it (a date picker never
+        // rewrote its date, a location box kept an answer it would have emptied). The page counts as focused from the
+        // start, as in a person's own browser and the built-in one.
+        _ = try? await call("Emulation.setFocusEmulationEnabled", ["enabled": true])
         let tree = try await call("Page.getFrameTree")
         if let frame = (tree["frameTree"] as? [String: Any])?["frame"] as? [String: Any] {
             mainFrame = frame["id"] as? String
